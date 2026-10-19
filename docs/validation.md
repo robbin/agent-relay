@@ -15,7 +15,10 @@ Passed in disposable local Git repositories:
 - macOS installer produces valid plist with escaped paths, refuses duplicate
   install, and uninstall preserves repository/logs. launchctl was MOCKED:
   no real job was registered and no production sync service was touched.
-- Workflow template YAML parses. Shell syntax checks pass.
+- Workflow templates and both skill frontmatters parse as YAML. Shell syntax checks pass.
+- GitHub Actions run [39219667010](https://github.com/robbin/agent-relay/actions/runs/39219667010)
+  passed on ubuntu-latest and macos-latest. The installer test still mocks launchctl
+  on macOS and skips on Linux; this does not constitute a live timer installation.
 
 Not yet verified for this extracted public version:
 - Fresh real launchd installation over a full scheduling cycle.
@@ -23,7 +26,6 @@ Not yet verified for this extracted public version:
 - Fresh Grok routine creation, payload presentation and skill auto-discovery.
 - Cloud accepted/result pushes from the new dedicated checkout.
 - End-to-end two-direction execution using the public English metadata format.
-- Linux runner execution of the tests (planned CI).
 
 The earlier private deployment passed bidirectional execution and real macOS
 timer delivery. It used localized metadata and a different cloud sync model.
