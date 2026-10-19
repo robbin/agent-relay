@@ -1,0 +1,48 @@
+name: Notify cloud agent
+on:
+  push:
+    branches: [main]
+    paths: ['tasks/to-cloud/**']
+permissions:
+  contents: read
+# No concurrency group: each push must retain its notification opportunity.
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Detect newly added pending tasks
+        id: filter
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+          FORCED: ${{ github.event.forced }}
+        run: |
+          result=$(bash .github/scripts/notify-filter.sh "$BEFORE" "$AFTER" "$FORCED")
+          echo "notify=$result" >> "$GITHUB_OUTPUT"
+      - name: Send wakeup
+        if: steps.filter.outputs.notify == 'true'
+        env:
+          BOT_WEBHOOK_URL: ${{ secrets.BOT_WEBHOOK_URL }}
+          BOT_WEBHOOK_SECRET: ${{ secrets.BOT_WEBHOOK_SECRET }}
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          AFTER: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          test -n "$BOT_WEBHOOK_URL"
+          test -n "$BOT_WEBHOOK_SECRET"
+          body=$(jq -cn --arg repo "$REPOSITORY" --arg ref "$REF" --arg after "$AFTER" \
+            '{event:"agent-relay",repository:$repo,ref:$ref,after:$after,path:"tasks/to-cloud/"}')
+          # Suppress transport response bodies and URLs; log only success/failure.
+          if ! curl --silent --fail --retry 3 --retry-all-errors \
+            --connect-timeout 15 --max-time 45 --output /dev/null \
+            -X POST "$BOT_WEBHOOK_URL" -H 'Content-Type: application/json' \
+            -H "Authorization: Bearer $BOT_WEBHOOK_SECRET" --data "$body"; then
+            echo 'Webhook delivery failed; inspect endpoint/authentication privately.'
+            exit 1
+          fi

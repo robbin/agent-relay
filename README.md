@@ -1,0 +1,79 @@
+# Agent Relay
+
+Git-backed task handoff between local and cloud AI agents.
+
+One Markdown file per task. Git for transport and history. A webhook wakes the
+cloud agent; a macOS timer delivers files locally without starting an AI session.
+
+[中文说明](README.zh-CN.md) · [Protocol](docs/protocol.md) · [Security](docs/security.md)
+
+## How it works
+
+```text
+Local → private Git repo / tasks/to-cloud → webhook → cloud agent
+Cloud → private Git repo / tasks/to-local → macOS sync → human starts local agent
+```
+
+Each task moves from `pending` to `accepted` to `done` or `blocked`.
+The receiving agent writes its result into the same file.
+Delivery is not acceptance; acceptance is not completion.
+
+No database, model polling loop, or always-running local agent.
+This is a reference implementation that an agent can read and use to help its
+user deploy the full workflow—not an agent runtime, a one-click hosted service,
+or a claim that every provider has been tested. The user supplies repository
+access, a supported cloud environment, webhook credentials and required approvals.
+Give your agent this repository and ask it to read this README, the protocol and
+the setup guide for each endpoint before proposing or making installation changes.
+
+## What's included
+
+- A shared task protocol and local/cloud skills.
+- A pull-only Git sync script and macOS launchd installer (300 seconds).
+- A GitHub Actions webhook template.
+- A Grok Bot integration guide and receiver prompt.
+- Isolated Git tests; no real webhook or agent required.
+
+## Setup
+
+1. Create a **separate, preferably private task repository**, with branch `main`.
+   Do not put real tasks in this public source repository.
+2. Copy `docs/protocol.md` into that repository as `tasks/README.md`.
+   Create `tasks/to-cloud/` and `tasks/to-local/` with empty `.gitkeep` files.
+   Commit and push this initial layout.
+3. Clone the task repository on each endpoint. Use a dedicated cloud checkout
+   outside any workspace managed by another auto-commit process.
+4. Follow [macOS setup](docs/setup-local-macos.md) and
+   [cloud / Grok setup](docs/setup-cloud-grok.md).
+5. Install the appropriate `skills/local/agent-relay/` or
+   `skills/cloud/agent-relay/` in your agent's skill directory.
+   Configure the task checkout path in that agent's instructions.
+6. Run the harmless acceptance procedure in [architecture](docs/architecture.md).
+
+Say “hand this task to the cloud agent”, “show incoming tasks without accepting”,
+or “take over task ID”. Drafting is not permission to publish.
+
+## Important limits
+
+The timer runs approximately every five minutes while the user session is active;
+sleep, network failure, dirty worktrees and locks can delay delivery.
+Cloud webhook notifications are at-least-once hints, not exactly-once execution.
+Git locks coordinate only participating processes.
+
+The original private deployment was tested in both directions. This extracted
+public candidate has separate validation: see [validation](docs/validation.md).
+Do not treat the original deployment's success as proof of a fresh Grok setup.
+
+Public v1 uses English `- Status:` metadata. It is not a drop-in replacement
+for earlier private deployments using localized metadata. Do not mix their
+workflow filters and task templates.
+
+## Development
+
+```sh
+bash tests/test-sync.sh
+bash tests/test-notify.sh
+```
+
+Git and Bash are sufficient for these tests. macOS is required for launchd.
+No package installation is needed. MIT licensed; see [LICENSE](LICENSE).

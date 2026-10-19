@@ -1,0 +1,23 @@
+name: Tests
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Shell syntax
+        run: |
+          for f in scripts/*.sh scripts/macos/*.sh tests/*.sh; do bash -n "$f"; done
+      - name: Validate YAML and skill frontmatter
+        run: |
+          ruby -e 'require "yaml"; ["templates/notify-cloud-bot.yml", ".github/workflows/test.yml"].each { |f| YAML.load_file(f) }; Dir.glob("skills/**/SKILL.md").each { |f| YAML.safe_load(File.read(f).split(/^---\s*$/)[1]) }'
+      - run: bash tests/test-sync.sh
+      - run: bash tests/test-notify.sh
+      - run: bash tests/test-installer-macos.sh
