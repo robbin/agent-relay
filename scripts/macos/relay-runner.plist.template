@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  io.agent-relay.runner — optional local auto-relay executor.
+
+  This file documents the launchd job that scripts/macos/install.sh generates
+  with plutil when the installer is called with its runner flag. It is a template, not an installed
+  file: replace every __PLACEHOLDER__ before using it manually.
+
+  The runner is off by default and only claims pending tasks in tasks/to-local/
+  whose `- Executor:` field explicitly matches the configured adapter. It relies
+  on the separate pull-only sync timer (io.agent-relay.sync) and never fetches,
+  pulls, rebases or force-pushes.
+
+  Manual install:
+    cp relay-runner.plist.template ~/Library/LaunchAgents/io.agent-relay.runner.plist
+    # edit placeholders first
+    plutil -lint ~/Library/LaunchAgents/io.agent-relay.runner.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.agent-relay.runner.plist
+  Manual removal:
+    launchctl bootout gui/$(id -u)/io.agent-relay.runner
+
+  Optional environment variables (add as sibling <key>/<string> entries under
+  EnvironmentVariables; every one is documented in docs/setup-local-macos.md):
+    RELAY_EXECUTOR=paseo|command
+    RELAY_EXECUTOR_BIN=/absolute/path/to/executor
+    RELAY_PASEO_WORKSPACE=<optional workspace id>
+    RELAY_DEFAULT_PROVIDER=<provider[/model]>
+    RELAY_DEFAULT_THINKING=<thinking option>
+    RELAY_WORKSPACE_ALLOWLIST=/abs/dir:/abs/other-dir
+    RELAY_PASEO_CONFIG=/absolute/path/to/config.json
+    RELAY_RUNNER_DRY_RUN=1
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.agent-relay.runner</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__RELAY_RUNNER_SCRIPT__</string>
+    <string>__RELAY_CHECKOUT__</string>
+  </array>
+
+  <!--
+    Same 300-second cadence as the sync job. RunAtLoad is false so the runner
+    never runs before the first scheduled pull; the script's own timing gate
+    (RELAY_MIN_SECONDS_AFTER_SYNC) additionally yields to a recent sync.
+  -->
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>LANG</key>
+    <string>en_US.UTF-8</string>
+    <key>LC_ALL</key>
+    <string>en_US.UTF-8</string>
+    <key>RELAY_EXPECTED_ORIGIN</key>
+    <string>__RELAY_EXPECTED_ORIGIN__</string>
+    <key>RELAY_LOG</key>
+    <string>__RELAY_LOG__</string>
+    <key>RELAY_SYNC_LOG</key>
+    <string>__RELAY_SYNC_LOG__</string>
+    <key>RELAY_STATE_DIR</key>
+    <string>__RELAY_STATE_DIR__</string>
+  </dict>
+
+  <!-- Script log and launchd stdout/stderr share one file; the script truncates
+       it in place when it exceeds RELAY_MAX_LOG_BYTES (default 10MB). -->
+  <key>StandardOutPath</key>
+  <string>__RELAY_LOG__</string>
+  <key>StandardErrorPath</key>
+  <string>__RELAY_LOG__</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>Nice</key>
+  <integer>5</integer>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+
+  <!-- The executor runs without waiting and may outlive the runner process. -->
+  <key>AbandonProcessGroup</key>
+  <true/>
+</dict>
+</plist>

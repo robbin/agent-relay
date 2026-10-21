@@ -20,4 +20,5 @@ jobs:
           ruby -e 'require "yaml"; ["templates/notify-cloud-bot.yml", ".github/workflows/test.yml"].each { |f| YAML.load_file(f) }; Dir.glob("skills/**/SKILL.md").each { |f| YAML.safe_load(File.read(f).split(/^---\s*$/)[1]) }'
       - run: bash tests/test-sync.sh
       - run: bash tests/test-notify.sh
+      - run: bash tests/test-relay-runner.sh
       - run: bash tests/test-installer-macos.sh

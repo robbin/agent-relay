@@ -20,13 +20,48 @@ Passed in disposable local Git repositories:
   passed on ubuntu-latest and macos-latest. The installer test still mocks launchctl
   on macOS and skips on Linux; this does not constitute a live timer installation.
 
-Not yet verified for this extracted public version:
-- Fresh real launchd installation over a full scheduling cycle.
-- Real GitHub Actions secret delivery and cloud webhook reception.
-- Fresh Grok routine creation, payload presentation and skill auto-discovery.
-- Cloud accepted/result pushes from the new dedicated checkout.
-- End-to-end two-direction execution using the public English metadata format.
+## Optional relay-runner candidate, 2026-10-22
 
+Passed in disposable local Git repositories on Linux (mocked executor, no macOS
+job registered, no real agent started):
+- `tests/test-relay-runner.sh` covers dry-run (no file/Git change, no dispatch,
+  no task lock), claim with a narrow task-only commit and push, English
+  `- Status: accepted` / `- Updated:` rewrite, dispatch marker, retained task
+  lock, and the one-task-at-a-time gate.
+- Non-opted-in pending tasks, `blocked` and `accepted` tasks are never claimed.
+- Dirty worktree, local commits ahead of origin/main, unfinished Git state and
+  missing origin/main cause a skip and preserve the scene.
+- Sync timing gate skips both a too-recent and a too-stale sync log.
+- Target directory handling: allowed in-allowlist path passed as `--cwd`,
+  outside-allowlist and missing paths both become `blocked` without dispatch.
+- Executor start failure becomes `blocked` and releases the task lock.
+- Unknown role and unavailable provider become `blocked`; no role/provider is
+  substituted. A valid role preset passes provider/model/mode/thinking and its
+  notes; unapplied `featureValues` are logged.
+- The configurable `command` adapter receives task ID, cwd/role flags and the
+  prompt on stdin. Pause marker, stale run-lock reclamation, live run-lock
+  respect and filename/ID mismatch handling are covered.
+- `bash tests/test-sync.sh`, `bash tests/test-notify.sh` and
+  `bash tests/test-relay-runner.sh` pass locally. Shell syntax checks pass for
+  all shipped scripts.
+- `tests/test-installer-macos.sh` was extended for optional runner plist
+  generation, escaped paths, reserved env rejection, duplicate refusal, and
+  uninstall preserving repo, logs, runner state and task locks. It skips on
+  Linux, so it was NOT executed for this record; macOS CI must run it with
+  launchctl still mocked.
+
+Not verified for this candidate:
+- A real Paseo dispatch, real role preset lookup against a live Paseo config, or
+  real `paseo provider ls` output.
+- A real launchd installation/scheduling cycle for `io.agent-relay.runner`.
+- End-to-end automatic local execution where a real agent writes Result, commits,
+  pushes and releases its own task lock.
+- Automatic bidirectional relay through a fresh Grok account, including a cloud
+  sender adding `- Executor:` and a real local runner claim.
+- Cross-process contention between the real sync timer, the runner and a manual
+  takeover beyond the mocked lock/timing cases.
+
+The runner tests are mocked unit/integration tests, not a live integration test.
 The earlier private deployment passed bidirectional execution and real macOS
-timer delivery. It used localized metadata and a different cloud sync model.
+timer delivery. It used localized metadata and a different runner implementation.
 Those results do not replace the above fresh-install checks.

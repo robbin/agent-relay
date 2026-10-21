@@ -3,7 +3,9 @@
 Git-backed task handoff between local and cloud AI agents.
 
 One Markdown file per task. Git for transport and history. A webhook wakes the
-cloud agent; a macOS timer delivers files locally without starting an AI session.
+cloud agent; by default a macOS timer delivers files locally without starting an
+AI session. An optional local runner can also claim and execute opted-in local
+tasks, so the relay can work automatically in both directions.
 
 [中文说明](README.zh-CN.md) · [Protocol](docs/protocol.md) · [Security](docs/security.md)
 
@@ -11,7 +13,8 @@ cloud agent; a macOS timer delivers files locally without starting an AI session
 
 ```text
 Local → private Git repo / tasks/to-cloud → webhook → cloud agent
-Cloud → private Git repo / tasks/to-local → macOS sync → human starts local agent
+Cloud → private Git repo / tasks/to-local → pull-only macOS sync
+                                           → optional runner (opt-in) or human-started local agent
 ```
 
 Each task moves from `pending` to `accepted` to `done` or `blocked`.
@@ -26,13 +29,29 @@ access, a supported cloud environment, webhook credentials and required approval
 Give your agent this repository and ask it to read this README, the protocol and
 the setup guide for each endpoint before proposing or making installation changes.
 
+## Automatic relay in both directions
+
+- **Local → cloud** is automatic after a new pending task is pushed: the GitHub
+  Actions webhook wakes the configured cloud agent.
+- **Cloud → local** arrives through the pull-only timer. By default a human still
+  starts the local agent. If you install the optional runner, a to-local task
+  that explicitly opts in with `- Executor:` is claimed and dispatched
+  automatically. Tasks without that field keep the manual view/takeover flow.
+- The runner is off by default. It never fetches or pulls, runs at most one task
+  at a time, and refuses dirty, divergent or locked checkouts.
+- A dispatch failure is recorded as `blocked` with a reason. The runner never
+  retries or substitutes another role/provider, and it never performs
+  high-risk actions itself: the dispatched agent must prepare publishing,
+  deletion, deployment, permission changes and external messages for approval.
+
 ## What's included
 
 - A shared task protocol and local/cloud skills.
 - A pull-only Git sync script and macOS launchd installer (300 seconds).
+- An optional local auto-relay runner, plist template and installer flag.
 - A GitHub Actions webhook template.
 - A Grok Bot integration guide and receiver prompt.
-- Isolated Git tests; no real webhook or agent required.
+- Isolated Git/mock tests; no real webhook or agent required.
 
 ## Setup
 
@@ -45,24 +64,31 @@ the setup guide for each endpoint before proposing or making installation change
    outside any workspace managed by another auto-commit process.
 4. Follow [macOS setup](docs/setup-local-macos.md) and
    [cloud / Grok setup](docs/setup-cloud-grok.md).
+   The local installer is pull-only unless you pass `--with-runner`.
 5. Install the appropriate `skills/local/agent-relay/` or
    `skills/cloud/agent-relay/` in your agent's skill directory.
    Configure the task checkout path in that agent's instructions.
 6. Run the harmless acceptance procedure in [architecture](docs/architecture.md).
+   Test the optional runner with `RELAY_RUNNER_DRY_RUN=1` first.
 
 Say “hand this task to the cloud agent”, “show incoming tasks without accepting”,
-or “take over task ID”. Drafting is not permission to publish.
+or “take over task ID”. Drafting is not permission to publish, and adding
+`- Executor:` is permission to dispatch a local agent only when the user says so.
 
 ## Important limits
 
 The timer runs approximately every five minutes while the user session is active;
 sleep, network failure, dirty worktrees and locks can delay delivery.
 Cloud webhook notifications are at-least-once hints, not exactly-once execution.
-Git locks coordinate only participating processes.
+Git locks coordinate only participating processes. The runner depends on the
+pull-only timer, keeps a task lock until the dispatched agent releases it, and
+does not verify the final result. A stale task lock or an abandoned `accepted`
+task stalls the queue until a human inspects it.
 
 The original private deployment was tested in both directions. This extracted
 public candidate has separate validation: see [validation](docs/validation.md).
 Do not treat the original deployment's success as proof of a fresh Grok setup.
+The runner tests use a mocked executor; they are not a live end-to-end proof.
 
 Public v1 uses English `- Status:` metadata. It is not a drop-in replacement
 for earlier private deployments using localized metadata. Do not mix their
@@ -73,7 +99,9 @@ workflow filters and task templates.
 ```sh
 bash tests/test-sync.sh
 bash tests/test-notify.sh
+bash tests/test-relay-runner.sh
 ```
 
-Git and Bash are sufficient for these tests. macOS is required for launchd.
+Git and Bash are sufficient for these tests. The runner test uses a fake
+executor and disposable Git repositories. macOS is required for launchd.
 No package installation is needed. MIT licensed; see [LICENSE](LICENSE).

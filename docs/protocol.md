@@ -15,6 +15,9 @@ Required header lines are `- Task ID:`, `- Status:`, and `- Updated:`.
 Use exactly one of each, before `## Result`; timestamps are ISO 8601 with timezone.
 Status is one of pending, accepted, done, blocked. Reject malformed tasks.
 
+Optional header lines (`- Executor:`, `- Role:`, `- Target directory:`) opt a
+to-local task into automatic local execution; see “Optional local auto-execution”.
+
 ```markdown
 # Review example
 
@@ -52,6 +55,45 @@ Only the user's explicit instruction to close without executing may bypass
 normal execution: mark done and state “Closed at user request; not executed”.
 Never imply the original acceptance criteria were met.
 
+## Optional local auto-execution
+
+A local endpoint may install the optional relay runner
+(`scripts/macos/relay-runner.sh`, launchd label `io.agent-relay.runner`). It is
+off by default and installing it is a separate, explicit step. Placing
+`- Executor:` in a to-local task is the sender's explicit opt-in to local
+automatic execution; only do that when the user authorized it for that task.
+Without the field, the task keeps the manual view/takeover flow.
+
+```markdown
+- Executor: paseo
+- Role: <preset name>
+- Target directory: /absolute/path
+```
+
+- `- Executor:` is required for automatic dispatch and must match the adapter
+  configured on the local runner (default `paseo`). Only pending to-local tasks
+  with a matching Executor are eligible; accepted, done and blocked tasks are
+  never retried.
+- `- Role:` is optional and selects a preset by exact name from the configured
+  executor profile file. A missing role, missing provider or unavailable
+  provider marks the task blocked. The runner never substitutes another role or
+  provider.
+- `- Target directory:` is optional and must be absolute, exist and be inside
+  the configured directory allowlist. The task checkout itself is always
+  allowed. An out-of-scope path is blocked, never silently redirected.
+- Before claiming, the runner requires branch main, a clean index/worktree, no
+  unfinished Git operation, HEAD equal to origin/main, an available shared Git
+  lock and no existing task lock. It claims at most one task per timer tick,
+  writes accepted with a fresh `- Updated:` value and pushes only that file.
+- The runner never fetches or pulls. It relies on the pull-only sync timer and
+  skips when the sync log is too recent (yield to sync) or too old (stale data).
+- A dispatch failure marks the task blocked with the reason. Blocked tasks are
+  neither retried nor replaced; recovery stays an explicit operator action.
+- The dispatched agent must stay inside the task scope and allowlist, prepare
+  (not perform) publishing, deletion, deployment, permission/firewall changes
+  and external messages, write Result, update status, push only authorized
+  files, and release its own task lock.
+
 ## Git and locking — both endpoints
 
 Use a dedicated checkout. Confirm expected repository identity, main branch,
@@ -62,6 +104,7 @@ Git operations share an atomic mkdir lock at
 `<actual-git-dir>/agent-relay-git.lock/`; find the actual directory using
 `git rev-parse --absolute-git-dir`. Record owner/session/time and release only
 your own lock. Keep it only around short Git operations, not task execution.
+The optional local runner follows the same rule for its claim/blocked commits.
 
 For receiving, create parent `<git-dir>/agent-relay-task-locks/`, then atomically
 mkdir its `<ID>/` child. Record the owner. Never execute without this task lock.
@@ -97,7 +140,8 @@ side effects. Automatic conflict-free rebase recovery is deliberately not suppli
 
 Automatic cloud wakeups scan all pending to-cloud tasks. Manual takeover
 handles the specified ID; with multiple candidates ask unless all were authorized.
-Local synchronization alone never accepts tasks.
+Local synchronization alone never accepts tasks. The optional local runner may
+accept only pending to-local tasks that explicitly opt in with `- Executor:`.
 
 1. Safely synchronize; validate task format, permissions and available inputs.
 2. Obtain the task lock, reread the file and verify it is still pending.

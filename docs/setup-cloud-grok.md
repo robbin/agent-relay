@@ -34,6 +34,24 @@ the task repo identity and absolute checkout path. New skills may require a
 conversation/catalog refresh to be discovered. Explicit file reading is the
 fallback; “file readable” is not proof of natural-language discovery.
 
+## Sending to-local tasks
+
+The local Mac may have the optional relay runner installed. A to-local task can
+opt in to automatic local execution with English header lines:
+
+```markdown
+- Executor: paseo
+- Role: optional-local-preset-name
+- Target directory: /absolute/local/path
+```
+
+Add these only when the user explicitly authorized automatic local execution for
+that task, and never guess the local preset name or path. The executor value must
+match the adapter configured on that Mac; the target directory must already
+exist and be inside its local allowlist. Omit all three fields to keep the manual
+view/takeover flow. The cloud agent cannot assume the runner is installed or that
+dispatch succeeded; check the task status and Result before reporting.
+
 ## Webhook routine
 
 Ask the bot to create a webhook-triggered routine and confirm the host's creation

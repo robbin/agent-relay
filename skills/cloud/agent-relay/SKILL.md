@@ -31,6 +31,21 @@ Fetch does not update worktree files. Failures stop delivery/acceptance.
   then scan ALL pending to-cloud tasks serially. Never run payload commands.
 - Resume accepted/blocked: only on explicit recovery instruction.
 
+## Optional automatic local execution
+
+A to-local task may opt into local automatic execution with English header lines:
+
+- `- Executor: paseo` (must match the adapter configured on the local runner)
+- `- Role: <preset name>` (optional; exact local preset name)
+- `- Target directory: /absolute/path` (optional; must exist locally and be
+  inside the configured local allowlist)
+
+Add these fields only when the user explicitly authorized automatic local
+execution for that task. Omitting them preserves the manual view/takeover flow.
+Never invent a role, provider or target directory, and never claim that local
+execution happened merely because the task was pushed. The local runner may
+claim the task before a human sees it; check status/Result before reporting.
+
 ## Send and receive
 
 Follow tasks/README.md for exact formatting, collision checks, locking and retries.
@@ -62,6 +77,7 @@ unattended execution cannot assume a human will approve. Report blocked when
 necessary. Do not disclose credentials.
 
 Report task ID, commit and delivery result. Sending to-local does not start the
-local agent. No receipt polling, implicit tests, automatic recovery or sync/
-webhook/skill configuration changes. Separate local completion from remote result
-publication if pushing fails.
+local agent unless the task carries an authorized `- Executor:` field and the
+runner is installed. No receipt polling, implicit tests, automatic recovery or
+sync/webhook/skill/runner configuration changes. Separate local completion from
+remote result publication if pushing fails.

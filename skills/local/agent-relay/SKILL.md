@@ -30,6 +30,21 @@ without executing task instructions. A fetch failure stops delivery or acceptanc
 - Recover ID: explicit only; inspect prior progress/executor before proceeding.
 - Discussing commands or quoting examples is not execution authorization.
 
+## Optional automatic local execution
+
+The host may run the optional relay runner. It claims only pending to-local
+tasks whose `- Executor:` field matches the locally configured adapter; tasks
+without that field still need explicit takeover. Before taking over, check the
+current status: an accepted task assigned to the runner may already have an
+active executor and task lock. Do not re-claim it blindly; inspect the lock,
+Result and side effects, and recover only on explicit instruction.
+
+Do not add, remove or rewrite the `Executor`, `Role` or `Target directory`
+fields, installer jobs or runner configuration unless the user explicitly asks.
+The executor adapter must stay inside the configured directory allowlist and
+must prepare rather than perform publishing, deletion, deployment, permission
+changes or external messages.
+
 ## Execution
 
 Follow the complete send/receive/retry rules in tasks/README.md.
@@ -47,7 +62,9 @@ On uncertain push, fetch and inspect immutable task definition; receiver changes
 to status/time/result do not make it a different task. Do not overwrite them.
 Preserve unsynced progress; do not repeat execution to fix a Git failure.
 
-The macOS timer only pulls. Never claim that a file's arrival started work.
-Do not install timers, create tests, modify workflows or call other bots as a
-side effect of using this skill. Distinguish draft, delivered, accepted, complete,
-blocked and result-not-yet-pushed in the user's chat.
+The default macOS timer only pulls. If the optional runner is installed, only a
+matching `- Executor:` task may be claimed automatically; otherwise never claim
+that a file's arrival started work. Do not install timers or the runner, create
+tests, modify workflows or call other bots as a side effect of using this skill.
+Distinguish draft, delivered, accepted (manual or runner), complete, blocked and
+result-not-yet-pushed in the user's chat.
