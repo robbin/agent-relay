@@ -294,6 +294,9 @@ guard_output() {
        --format='@@RELAY-COMMIT@@%n%w(0,4,4)%B' "origin/main..$GUARD_SCANNED_SHA" >"$dir/log" 2>/dev/null; then
     GUARD_OUT_ERR='cannot read the commits to push'; rm -rf "$dir"; return 2
   fi
+  # Strip NUL bytes so binary content stays scannable with BSD awk/grep (macOS).
+  LC_ALL=C tr -d '\000' <"$dir/log" >"$dir/log.txt" \
+    || { GUARD_OUT_ERR='cannot prepare the commits to push'; rm -rf "$dir"; return 2; }
   # Emit "<label>\t<added line>" for commit messages and added diff lines.
   awk '
     /^@@RELAY-COMMIT@@$/ { label = "commit message"; inmsg = 1; hdr = 0; next }
@@ -303,11 +306,11 @@ guard_output() {
     /^@@ / { hdr = 0; next }
     hdr { next }
     /^\+/ { print label "\t" substr($0, 2) }
-  ' "$dir/log" >"$dir/added" 2>/dev/null || { GUARD_OUT_ERR='cannot parse the commits to push'; rm -rf "$dir"; return 2; }
+  ' "$dir/log.txt" >"$dir/added" 2>/dev/null || { GUARD_OUT_ERR='cannot parse the commits to push'; rm -rf "$dir"; return 2; }
   for pat in "${GUARD_SECRET_PATTERNS[@]}"; do
-    if cut -f2- "$dir/added" | grep -Eq -- "$pat" 2>/dev/null; then
+    if cut -f2- "$dir/added" | LC_ALL=C grep -aEq -- "$pat" 2>/dev/null; then
       patterns="${patterns}${pat}"$'\n'
-      files="${files}$(grep -E -- "$pat" "$dir/added" 2>/dev/null | cut -f1 | sort -u)"$'\n'
+      files="${files}$(LC_ALL=C grep -aE -- "$pat" "$dir/added" 2>/dev/null | cut -f1 | sort -u)"$'\n'
     fi
   done
   rm -rf "$dir"
