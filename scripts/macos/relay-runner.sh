@@ -5,8 +5,22 @@
 #
 # launchd calls this every 300 seconds. It scans <checkout>/tasks/to-local/ for
 # pending tasks whose `- Executor:` field explicitly matches the configured
-# executor adapter, claims at most one, dispatches it to that adapter, and exits
-# without waiting for the work to finish.
+# executor adapter, claims at most one and dispatches it to that adapter.
+#
+# Safety guards (see docs/security.md):
+#   1. Target directory allowlist: the raw path must not contain `..`; the real
+#      path (symlinks resolved) must be inside the checkout, an allowlist entry,
+#      or an existing first-level project under RELAY_PROJECTS_ROOT.
+#   2. Task body scan: the task text (everything except pure metadata header
+#      lines and the Result section) is matched against sensitive patterns
+#      (.ssh, private keys, .env, Keychain, upload commands, ...). A hit blocks
+#      the task without starting the executor and without echoing the text.
+#   3. Output gate (RELAY_GUARD_WAIT=1, default): the executor commits but does
+#      not push; the runner waits for it, scans the Result section and changed
+#      files for likely secrets, and pushes only when clean. A hit marks the
+#      task blocked in a local-only commit, writes the PAUSED marker and pushes
+#      nothing. RELAY_GUARD_WAIT=0 restores the fire-and-forget behaviour
+#      (the executor pushes itself; layer 3 is then not enforced).
 #
 # The runner NEVER fetches, pulls, merges, rebases, stashes, resets or force
 # pushes. It relies on the separate pull-only sync timer and refuses to act on a
@@ -55,11 +69,17 @@ DEFAULT_THINKING=${RELAY_DEFAULT_THINKING:-}
 # Colon-separated absolute directories the executor may work in (the task
 # checkout itself is always allowed). Empty means: checkout only.
 WORKSPACE_ALLOWLIST=${RELAY_WORKSPACE_ALLOWLIST:-}
+# Optional projects root: any EXISTING first-level directory below it (and its
+# subdirectories) is allowed; the root itself is not. Empty disables this.
+PROJECTS_ROOT=${RELAY_PROJECTS_ROOT:-}
+# 1 = wait for the executor, gate its output, then push (default).
+# 0 = legacy asynchronous dispatch; the executor pushes and layer 3 is skipped.
+GUARD_WAIT=${RELAY_GUARD_WAIT:-1}
 
 # Optional identity check for origin; empty disables the check.
 EXPECTED_ORIGIN=${RELAY_EXPECTED_ORIGIN:-}
 
-MIN_SECONDS_AFTER_SYNC=${RELAY_MIN_SECONDS_AFTER_SYNC:-120}
+MIN_SECONDS_AFTER_SYNC=${RELAY_MIN_SECONDS_AFTER_SYNC:-30}
 MAX_SYNC_AGE=${RELAY_MAX_SYNC_AGE:-1500}
 PUSH_RETRIES=${RELAY_PUSH_RETRIES:-3}
 PUSH_RETRY_DELAY=${RELAY_PUSH_RETRY_DELAY:-10}
@@ -74,6 +94,10 @@ for _v in MIN_SECONDS_AFTER_SYNC MAX_SYNC_AGE PUSH_RETRIES PUSH_RETRY_DELAY \
     ''|*[!0-9]*) echo "invalid numeric setting $_v=${!_v}" >&2; exit 1 ;;
   esac
 done
+case "$GUARD_WAIT" in
+  0|1) ;;
+  *) echo "invalid RELAY_GUARD_WAIT=$GUARD_WAIT (expected 0 or 1)" >&2; exit 1 ;;
+esac
 case "$EXECUTOR" in
   paseo|command) ;;
   *) echo "unsupported RELAY_EXECUTOR=$EXECUTOR (expected paseo or command)" >&2; exit 1 ;;
@@ -135,11 +159,22 @@ matches_executor() { [ -n "$1" ] && [ "$(lc "$1")" = "$(lc "$EXECUTOR")" ]; }
 
 resolve_dir() { (cd "$1" 2>/dev/null && pwd -P); }
 
-# Allow: the task checkout (or a directory inside it) and each allowlist entry.
+# ---------------------------------------------------------------- guard 1: target directory
+# Allow: the task checkout (or a directory inside it), each allowlist entry, and
+# existing first-level projects under PROJECTS_ROOT. Comparison uses real paths
+# (cd + pwd -P) on both sides, so symlinks cannot escape. The raw value must not
+# contain a `..` segment. Sets DIR_ERR on failure.
 dir_allowed() {
-  local candidate repo_real entry base
-  candidate=$(resolve_dir "$1") || return 1
-  repo_real=$(resolve_dir "$REPO") || return 1
+  local raw=$1 candidate repo_real entry base rel first
+  DIR_ERR=''
+  case "/$raw/" in
+    */../*) DIR_ERR="Target directory contains a '..' segment: $raw"; return 1 ;;
+  esac
+  candidate=$(resolve_dir "$raw") || { DIR_ERR="Target directory cannot be resolved: $raw"; return 1; }
+  repo_real=$(resolve_dir "$REPO") || { DIR_ERR='checkout cannot be resolved'; return 1; }
+  case "$candidate/" in
+    "$repo_real"/.git/*) DIR_ERR="Target directory is inside the checkout's .git directory: $raw"; return 1 ;;
+  esac
   if [ "$candidate" = "$repo_real" ]; then return 0; fi
   case "$candidate" in "$repo_real"/*) return 0 ;; esac
   local IFS=:
@@ -149,7 +184,140 @@ dir_allowed() {
     if [ "$candidate" = "$base" ]; then return 0; fi
     case "$candidate" in "$base"/*) return 0 ;; esac
   done
+  if [ -n "$PROJECTS_ROOT" ] && base=$(resolve_dir "$PROJECTS_ROOT"); then
+    case "$candidate" in
+      "$base"/*)
+        rel=${candidate#"$base"/}
+        first=${rel%%/*}
+        if [ -n "$first" ] && [ "$(resolve_dir "$base/$first" || true)" = "$base/$first" ]; then
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  DIR_ERR="Target directory is outside the configured allowlist: $raw (real path $candidate)"
   return 1
+}
+
+# ---------------------------------------------------------------- guard 2: task body scan
+# Extended regexes matched case-insensitively against the task body. Token
+# matching is deliberately narrow (access/auth/api/refresh/bearer/bot token, or
+# token= / token:) so ordinary words such as "token count" do not trigger.
+GUARD_SENSITIVE_PATTERNS=(
+  '\.ssh'
+  'id_rsa|id_ed25519|id_ecdsa'
+  'private[ _-]?key'
+  'auth\.json'
+  'keychain|security +find-'
+  '(^|[^a-z0-9])\.env([^a-z0-9]|$)'
+  'secrets?'
+  'credentials?'
+  '(access|auth|api|refresh|bearer|bot)[_ -]?token|token[[:space:]]*[=:]'
+  'password|passwd'
+  'api[_-]?key'
+  '\.aws'
+  '\.gnupg'
+  'cookies|login data'
+  '(scp|rsync) .*:'
+  '(curl|wget).*(-d|--data|-F|--form|-T|--upload-file)'
+  '(^|[^a-z])nc( |$)'
+  'base64.*(curl|wget|nc|scp)'
+  'pastebin|transfer\.sh|0x0\.st|ix\.io'
+)
+# Non-ASCII patterns (matched without -i to avoid locale differences).
+GUARD_SENSITIVE_PATTERNS_UTF8=(
+  '密码'
+  '私钥'
+  '密钥'
+  '凭据'
+)
+
+# Only metadata header lines whose values the runner validates itself are
+# skipped (Task ID, Status, Executor, Role, Target directory). Everything else,
+# including "- Task:", "- Constraints:", "- Inputs:" and any pre-filled Result
+# text, is scanned: a pending task's Result should be empty.
+guard_scan() { # $1=task file; on a hit sets GUARD_SCAN_HITS (pattern names only)
+  local file=$1 body pat hits=''
+  GUARD_SCAN_HITS=''
+  body=$(mktemp "$TMP_DIR/scan.XXXXXX") || { GUARD_SCAN_HITS='cannot create temp file'; return 1; }
+  awk '
+    { low = tolower($0) }
+    low ~ /^-[ \t]*(task id|status|executor|role|target directory)[ \t]*:/ { next }
+    # Notes appended by the runner itself (so a fixed task can be recovered).
+    /^- Runner: (dispatch|output gate) blocked (this task )?at [0-9TZ:-]+: / { next }
+    /^- Needed: (fix the cause above|nothing was pushed)\. / { next }
+    { print }
+  ' "$file" >"$body" 2>/dev/null || { rm -f "$body"; GUARD_SCAN_HITS='cannot read the task body'; return 1; }
+  for pat in "${GUARD_SENSITIVE_PATTERNS[@]}"; do
+    if LC_ALL=C grep -Eqi -- "$pat" "$body" 2>/dev/null; then hits="${hits}${hits:+; }${pat}"; fi
+  done
+  for pat in "${GUARD_SENSITIVE_PATTERNS_UTF8[@]}"; do
+    if grep -Fq -- "$pat" "$body" 2>/dev/null; then hits="${hits}${hits:+; }${pat}"; fi
+  done
+  rm -f "$body"
+  if [ -n "$hits" ]; then GUARD_SCAN_HITS=$hits; return 1; fi
+  return 0
+}
+
+# ---------------------------------------------------------------- guard 3: output gate
+# Case-sensitive extended regexes for likely secrets. 40-char Git SHAs are below
+# the {48,} hex threshold on purpose.
+GUARD_SECRET_PATTERNS=(
+  'sk-[A-Za-z0-9_-]{20,}'
+  'ghp_[A-Za-z0-9]{30,}'
+  'gh[ousr]_[A-Za-z0-9]{30,}'
+  'github_pat_[A-Za-z0-9_]{20,}'
+  'xox[abpr]-[A-Za-z0-9-]{10,}'
+  'AKIA[0-9A-Z]{16}'
+  '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+  '[0-9a-fA-F]{48,}'
+  '[A-Za-z0-9+/]{60,}={0,2}'
+  'Bearer +[A-Za-z0-9._~+/-]{20,}'
+  "[A-Za-z0-9_]*(KEY|TOKEN|SECRET)[A-Za-z0-9_]* *[=:] *['\"]?[A-Za-z0-9/+._-]{12,}"
+)
+
+join_unique() { printf '%s\n' "$1" | awk 'NF && !seen[$0]++' | tr '\n' ';' | sed -e 's/;$//'; }
+
+# Scans exactly what would be pushed: every commit in origin/main..HEAD (commit
+# messages and all added lines, including binary content via --text and blobs
+# that a later commit deleted). Uncommitted leftovers are never pushed.
+# Returns 0 = clean, 1 = likely secret found, 2 = the check itself failed.
+# Any non-zero result means: do not push. Only pattern and file names are
+# recorded, never the matched values. Sets GUARD_SCANNED_SHA.
+guard_output() {
+  local dir pat patterns='' files=''
+  GUARD_OUT_PATTERNS=''; GUARD_OUT_FILES=''; GUARD_OUT_ERR=''; GUARD_SCANNED_SHA=''
+  GUARD_SCANNED_SHA=$(git -C "$REPO" rev-parse --verify HEAD 2>/dev/null) \
+    || { GUARD_OUT_ERR='cannot resolve HEAD'; return 2; }
+  dir=$(mktemp -d "$TMP_DIR/guard.XXXXXX") || { GUARD_OUT_ERR='mktemp -d failed'; return 2; }
+  if ! git -C "$REPO" -c core.quotePath=false log -p -m -U0 --text --no-renames --no-color \
+       --format='@@RELAY-COMMIT@@%n%w(0,4,4)%B' "origin/main..$GUARD_SCANNED_SHA" >"$dir/log" 2>/dev/null; then
+    GUARD_OUT_ERR='cannot read the commits to push'; rm -rf "$dir"; return 2
+  fi
+  # Emit "<label>\t<added line>" for commit messages and added diff lines.
+  awk '
+    /^@@RELAY-COMMIT@@$/ { label = "commit message"; inmsg = 1; hdr = 0; next }
+    /^diff --git / { inmsg = 0; hdr = 1; label = "?"; next }
+    inmsg { print label "\t" $0; next }
+    hdr && /^\+\+\+ / { f = substr($0, 5); sub(/^b\//, "", f); label = f; next }
+    /^@@ / { hdr = 0; next }
+    hdr { next }
+    /^\+/ { print label "\t" substr($0, 2) }
+  ' "$dir/log" >"$dir/added" 2>/dev/null || { GUARD_OUT_ERR='cannot parse the commits to push'; rm -rf "$dir"; return 2; }
+  for pat in "${GUARD_SECRET_PATTERNS[@]}"; do
+    if cut -f2- "$dir/added" | grep -Eq -- "$pat" 2>/dev/null; then
+      patterns="${patterns}${pat}"$'\n'
+      files="${files}$(grep -E -- "$pat" "$dir/added" 2>/dev/null | cut -f1 | sort -u)"$'\n'
+    fi
+  done
+  rm -rf "$dir"
+  if [ -n "$patterns" ]; then
+    GUARD_OUT_PATTERNS=$(join_unique "$patterns")
+    GUARD_OUT_FILES=$(join_unique "$files")
+    [ -n "$GUARD_OUT_FILES" ] || GUARD_OUT_FILES='?'
+    return 1
+  fi
+  return 0
 }
 
 # ---------------------------------------------------------------- lock helpers
@@ -394,6 +562,102 @@ block_task() { # $1=file $2=relative path $3=task ID $4=reason
   return "$rc"
 }
 
+# Output gate passed: push the executor's local commits under the shared lock.
+push_guarded() {
+  local i=1 tries=0
+  while ! acquire_git_lock; do
+    tries=$((tries + 1))
+    if [ "$tries" -ge 20 ]; then
+      log "error: shared Git lock still held ($GIT_DIR/$GITLOCK_NAME); local commits kept, not pushed"
+      return 1
+    fi
+    sleep "$LOCK_RECHECK_SECONDS"
+  done
+  if [ "$(git -C "$REPO" rev-parse HEAD 2>/dev/null)" != "$GUARD_SCANNED_SHA" ]; then
+    log 'error: HEAD moved after the output gate scan; refusing to push unscanned commits'
+    release_git_lock
+    return 1
+  fi
+  while [ "$i" -le "$PUSH_RETRIES" ]; do
+    if git -C "$REPO" push origin "$GUARD_SCANNED_SHA:refs/heads/main" >>"$LOG_FILE" 2>&1; then
+      release_git_lock
+      return 0
+    fi
+    log "guarded push failed (attempt $i/$PUSH_RETRIES)"
+    [ "$i" -lt "$PUSH_RETRIES" ] && sleep "$PUSH_RETRY_DELAY"
+    i=$((i + 1))
+  done
+  release_git_lock
+  return 1
+}
+
+# Output gate hit: mark blocked in a LOCAL-ONLY commit. Never pushes.
+block_local() { # $1=file $2=relative path $3=task ID $4=reason (pattern/file names only)
+  local file=$1 rel=$2 id=$3 reason=$4 ts tmp
+  ts=$(now_utc)
+  tmp=$(mktemp "$TMP_DIR/tmp.XXXXXX") || { log 'error: mktemp failed'; return 1; }
+  awk -v ts="$ts" -v reason="$reason" '
+    BEGIN { status_done = 0; updated_done = 0 }
+    {
+      low = tolower($0)
+      if (!status_done && low ~ /^-[ \t]*status[ \t]*:/) { print "- Status: blocked"; status_done = 1; next }
+      if (!updated_done && low ~ /^-[ \t]*updated[ \t]*:/) { print "- Updated: " ts; updated_done = 1; next }
+      print
+    }
+    END {
+      print ""
+      print "- Runner: output gate blocked this task at " ts ": " reason
+      print "- Needed: nothing was pushed. Inspect and clean the unpushed local commits (git log origin/main..HEAD), then remove the PAUSED marker to resume."
+    }
+  ' "$file" >"$tmp" || { rm -f "$tmp"; log 'error: cannot build blocked file'; return 1; }
+  if ! acquire_git_lock; then
+    rm -f "$tmp"; log 'error: Git lock unavailable; blocked state not recorded locally'; return 1
+  fi
+  mv "$tmp" "$file" || { rm -f "$tmp"; release_git_lock; log 'error: cannot replace the task file'; return 1; }
+  git -C "$REPO" add -- "$rel" || { release_git_lock; log "error: git add failed ($rel)"; return 1; }
+  if ! git -C "$REPO" diff --cached --quiet -- "$rel"; then
+    git -C "$REPO" commit -q -m "Task $id: output gate blocked (not pushed)" -- "$rel" \
+      || { release_git_lock; log 'error: local blocked commit failed'; return 1; }
+  fi
+  release_git_lock
+  log "recorded blocked locally (not pushed): $rel"
+  return 0
+}
+
+write_pause() { # $1=reason (no secret values)
+  {
+    printf 'Paused at: %s\n' "$(now_utc)"
+    printf 'Reason: %s\n' "$1"
+    printf 'Recovery: inspect git log/diff origin/main..HEAD in %s, clean the unpushed commits, then delete %s.\n' "$REPO" "$PAUSE_FILE"
+  } >"$PAUSE_FILE" 2>/dev/null && { log "pause marker written: $PAUSE_FILE"; return 0; }
+  log "error: could not write the pause marker $PAUSE_FILE"
+  return 1
+}
+
+# With the output gate on, the executor's own pushes are disabled (best effort):
+# its Git processes inherit an invalid origin pushurl via GIT_CONFIG_* env, and
+# the checkout gets the same pushurl in its local config while the executor
+# runs (only when no pushurl is configured; removed again afterwards). The
+# runner's own guarded push names the fetch URL explicitly.
+GUARD_PUSHURL=relay-guard-push-disabled://
+block_executor_push() {
+  [ "$GUARD_WAIT" = 1 ] || return 0
+  [ -z "$(git -C "$REPO" config --get-all remote.origin.pushurl 2>/dev/null)" ] || return 0
+  git -C "$REPO" config remote.origin.pushurl "$GUARD_PUSHURL" 2>/dev/null \
+    || log 'warning: could not disable executor pushes in the checkout config'
+}
+unblock_executor_push() {
+  if [ "$(git -C "$REPO" config --get-all remote.origin.pushurl 2>/dev/null)" = "$GUARD_PUSHURL" ]; then
+    git -C "$REPO" config --unset remote.origin.pushurl 2>/dev/null || true
+  fi
+}
+executor_env() {
+  if [ "$GUARD_WAIT" = 1 ]; then
+    printf '%s\n' GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.pushurl \
+      GIT_CONFIG_VALUE_0=relay-guard-push-disabled://
+  fi
+}
+
 # ---------------------------------------------------------------- executor config
 # Read only daemon.agentProfiles from a Paseo config. A missing role is an error;
 # the runner never substitutes a different role or provider.
@@ -529,11 +793,19 @@ resolve_executor_bin() {
 
 # ---------------------------------------------------------------- dispatch
 build_prompt() { # $1=task ID $2=relative path $3=task lock path
-  local id=$1 rel=$2 tasklock=$3 notes allowlist
+  local id=$1 rel=$2 tasklock=$3 notes allowlist push_rule finish_verb
+  if [ "$GUARD_WAIT" = 1 ]; then
+    push_rule='Do NOT git push: the runner scans your output and pushes it only if clean.'
+    finish_verb='commit (do not push)'
+  else
+    push_rule='Push your commit to origin main when done.'
+    finish_verb='commit/push'
+  fi
   notes=$ROLE_NOTES
   [ -n "$notes" ] || notes='No extra role notes. Act as a careful general-purpose executor.'
   allowlist=$WORKSPACE_ALLOWLIST
   [ -n "$allowlist" ] || allowlist='none configured (the task checkout only)'
+  [ -z "$PROJECTS_ROOT" ] || allowlist="$allowlist; existing projects directly under $PROJECTS_ROOT"
 
   cat <<EOF
 You were dispatched automatically by the local Agent Relay runner for task $id.
@@ -563,14 +835,15 @@ Hard requirements:
 5. Commit only this task file and material the task explicitly authorizes.
    Never use git add -A, force-push, rebase, reset or stash; never rewrite other
    commits. Do not modify tasks/README.md or other task files.
+   $push_rule
 6. Before Git writes, take the shared lock: run 'git rev-parse --absolute-git-dir'
    in $REPO, then 'mkdir <git-dir>/$GITLOCK_NAME'. If that fails, wait for the
    next opportunity; never delete another process's lock. Release only your own
-   lock after committing and pushing.
+   lock after committing.
 7. Do not modify, load or install credential-related launchd jobs, do not read
    the Keychain, and never print or persist secrets.
 8. Release your task lock when finished: 'rmdir $tasklock' — only this lock.
-9. If you cannot finish, set blocked with the reason and commit/push it. Do not
+9. If you cannot finish, set blocked with the reason and $finish_verb it. Do not
    leave a half-done state or silently repeat an action with side effects.
 EOF
 }
@@ -587,8 +860,13 @@ launch_paseo() { # $1=task ID $2=cwd $3=prompt
   fi
 
   # The prompt is positional and must remain last.
-  args=(run --no-wait)
-  desc="run --no-wait"
+  # With the output gate on, wait for the agent (no --no-wait) so the runner can
+  # inspect its local commits before anything is pushed.
+  if [ "$GUARD_WAIT" = 1 ]; then
+    args=(run); desc=run
+  else
+    args=(run --no-wait); desc="run --no-wait"
+  fi
   if [ -n "$PASEO_WORKSPACE" ]; then
     args+=(--workspace "$PASEO_WORKSPACE"); desc+=" --workspace $PASEO_WORKSPACE"
   fi
@@ -607,7 +885,10 @@ launch_paseo() { # $1=task ID $2=cwd $3=prompt
 
   log "dispatch: $EXECUTOR_BIN_PATH $desc"
   local rc
-  if "$EXECUTOR_BIN_PATH" "${args[@]}" >>"$LOG_FILE" 2>&1; then
+  local _e
+  local -a xenv=()
+  while IFS= read -r _e; do [ -n "$_e" ] && xenv+=("$_e"); done < <(executor_env)
+  if env ${xenv[@]+"${xenv[@]}"} "$EXECUTOR_BIN_PATH" "${args[@]}" >>"$LOG_FILE" 2>&1; then
     log "dispatch accepted: $id (role $ROLE_NAME)"
     return 0
   else
@@ -632,10 +913,12 @@ launch_command() { # $1=task ID $2=relative path $3=cwd $4=prompt
   fi
 
   log "dispatch: $EXECUTOR_BIN_PATH $desc <prompt on stdin>"
-  local rc
+  local rc _e
+  local -a xenv=()
+  while IFS= read -r _e; do [ -n "$_e" ] && xenv+=("$_e"); done < <(executor_env)
   if ( export RELAY_TASK_ID="$id" RELAY_TASK_FILE="$rel" RELAY_TASK_CWD="$cwd" \
            RELAY_TASK_ROLE="$ROLE_NAME"; printf '%s\n' "$prompt" ) \
-       | "$EXECUTOR_BIN_PATH" "${args[@]}" >>"$LOG_FILE" 2>&1; then
+       | env ${xenv[@]+"${xenv[@]}"} "$EXECUTOR_BIN_PATH" "${args[@]}" >>"$LOG_FILE" 2>&1; then
     log "dispatch accepted: $id (executor $EXECUTOR)"
     return 0
   else
@@ -657,7 +940,7 @@ launch_executor() { # $1=task ID $2=relative path $3=cwd $4=task lock
 # ---------------------------------------------------------------- main
 main() {
   rotate_log
-  log "──── relay-runner start (pid $$, executor $EXECUTOR, checkout $REPO)"
+  log "──── relay-runner start (pid $$, executor $EXECUTOR, checkout $REPO, guard_wait $GUARD_WAIT)"
   trap 'release_git_lock; release_run_lock' EXIT
 
   if [ -f "$PAUSE_FILE" ]; then
@@ -665,6 +948,7 @@ main() {
     return 0
   fi
   acquire_run_lock || return 1
+  unblock_executor_push   # recover from an interrupted earlier round
   check_sync_timing || return 0
   repo_ready || return 0
 
@@ -740,6 +1024,18 @@ main() {
       continue
     fi
 
+    # Guard 2 (before claiming): scan the task body; never echo the matched text.
+    if ! guard_scan "$file"; then
+      log "guard 2 blocked: task body matched sensitive patterns: $GUARD_SCAN_HITS"
+      if ! block_task "$file" "$rel" "$base" "Task body matched sensitive patterns: $GUARD_SCAN_HITS"; then
+        rmdir "$tasklock" 2>/dev/null || true
+        log 'stopping this round: could not record the blocked state'
+        return 1
+      fi
+      rmdir "$tasklock" 2>/dev/null || true
+      continue
+    fi
+
     if ! claim_task "$file" "$rel" "$base"; then
       log 'claim failed; releasing the task lock and ending this round without dispatch'
       rmdir "$tasklock" 2>/dev/null || true
@@ -747,6 +1043,8 @@ main() {
     fi
 
     cwd=$(read_field "$file" 'Target directory')
+    # No target directory: pin the executor to the task checkout.
+    [ -n "$cwd" ] || cwd=$REPO
     role_field=$(read_field "$file" Role)
 
     if [ -n "$cwd" ]; then
@@ -772,8 +1070,8 @@ main() {
         continue
       fi
       if ! dir_allowed "$cwd"; then
-        log "target directory is outside the allowlist: $cwd"
-        if ! block_task "$file" "$rel" "$base" "Target directory is outside the configured allowlist: $cwd"; then
+        log "guard 1 blocked: $DIR_ERR"
+        if ! block_task "$file" "$rel" "$base" "$DIR_ERR"; then
           rmdir "$tasklock" 2>/dev/null || true
           log 'stopping this round: could not record the blocked state'
           return 1
@@ -830,15 +1128,53 @@ main() {
       log "command adapter: role=${ROLE_NAME} (no preset lookup)"
     fi
 
-    if launch_executor "$base" "$rel" "$cwd" "$tasklock"; then
+    block_executor_push
+    local launch_ok=0
+    launch_executor "$base" "$rel" "$cwd" "$tasklock" && launch_ok=1
+    unblock_executor_push
+    if [ "$launch_ok" = 1 ]; then
       if [ "$DRY_RUN" = 1 ]; then
         rmdir "$tasklock" 2>/dev/null || true
         log '[dry-run] no marker written; task lock released'
-      else
-        : >"$MARKER_DIR/$base" || log "warning: could not write dispatch marker $MARKER_DIR/$base"
-        log 'round complete: dispatched one task; the task lock stays until that agent releases it'
+        return 0
       fi
-      return 0
+      : >"$MARKER_DIR/$base" || log "warning: could not write dispatch marker $MARKER_DIR/$base"
+      if [ "$GUARD_WAIT" != 1 ]; then
+        log 'round complete: dispatched one task; the task lock stays until that agent releases it (RELAY_GUARD_WAIT=0: output gate not enforced)'
+        return 0
+      fi
+
+      # Guard 3: the executor has finished; gate its output before pushing.
+      local guard_rc=0
+      if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
+        log 'warning: the executor left uncommitted changes; they are never pushed and the checkout stays dirty until the user inspects it'
+      fi
+      guard_output || guard_rc=$?
+      if [ "$guard_rc" = 0 ]; then
+        rmdir "$tasklock" 2>/dev/null || true
+        if [ -z "$(git -C "$REPO" rev-list origin/main..HEAD 2>/dev/null)" ]; then
+          log "output gate passed: $base (no local commits to push)"
+          return 0
+        fi
+        if push_guarded; then
+          log "output gate passed and pushed: $base"
+          return 0
+        fi
+        log "error: output gate passed but push failed; local commits kept for inspection"
+        write_pause "task $base passed the output gate but the guarded push failed; inspect git log origin/main..HEAD"
+        return 1
+      fi
+      if [ "$guard_rc" = 1 ]; then
+        log "guard 3 blocked: likely secret in output (patterns: $GUARD_OUT_PATTERNS; files: $GUARD_OUT_FILES); nothing pushed"
+        block_local "$file" "$rel" "$base" "likely secret in output (patterns: $GUARD_OUT_PATTERNS; files: $GUARD_OUT_FILES)"
+        write_pause "task $base output gate hit (patterns: $GUARD_OUT_PATTERNS; files: $GUARD_OUT_FILES)"
+      else
+        log "guard 3 could not complete ($GUARD_OUT_ERR); nothing pushed"
+        block_local "$file" "$rel" "$base" "output gate could not complete: $GUARD_OUT_ERR"
+        write_pause "task $base output gate could not complete: $GUARD_OUT_ERR"
+      fi
+      rmdir "$tasklock" 2>/dev/null || true
+      return 1
     fi
 
     block_task "$file" "$rel" "$base" "Executor failed to start; see the runner log"

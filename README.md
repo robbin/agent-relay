@@ -44,6 +44,25 @@ the setup guide for each endpoint before proposing or making installation change
   high-risk actions itself: the dispatched agent must prepare publishing,
   deletion, deployment, permission changes and external messages for approval.
 
+### Safety guards
+
+The runner applies three fail-closed guards (details in
+[docs/security.md](docs/security.md)):
+
+1. **Target directory allowlist** — a raw path containing `..` is rejected; the
+   real path (symlinks resolved) must be inside the task checkout,
+   `RELAY_WORKSPACE_ALLOWLIST`, or an existing project directly under
+   `RELAY_PROJECTS_ROOT`.
+2. **Task body scan** — before claiming, the task text (all but the validated
+   metadata headers) is checked for sensitive patterns such as `.ssh`, private keys,
+   `.env`, Keychain, credential/token assignments and upload commands
+   (`curl -F`, `scp host:`...). A hit marks the task `blocked` without starting
+   the executor and without echoing the text.
+3. **Output gate** (`RELAY_GUARD_WAIT=1`, default) — the executor only commits;
+   the runner waits, scans every commit it would push (messages and added
+   lines) for likely secrets, and pushes only if clean. A hit records `blocked` in a local-only
+   commit, writes the `PAUSED` marker and pushes nothing.
+
 ## What's included
 
 - A shared task protocol and local/cloud skills.
@@ -100,6 +119,7 @@ workflow filters and task templates.
 bash tests/test-sync.sh
 bash tests/test-notify.sh
 bash tests/test-relay-runner.sh
+bash tests/test-relay-guard.sh
 ```
 
 Git and Bash are sufficient for these tests. The runner test uses a fake

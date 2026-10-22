@@ -63,6 +63,9 @@ export RELAY_DEFAULT_THINKING="high"
 export RELAY_WORKSPACE_ALLOWLIST="$TMP/work"
 export RELAY_PUSH_RETRY_DELAY=0
 export RELAY_LOCK_RECHECK_SECONDS=0
+# This file covers the legacy asynchronous dispatch path; the output gate
+# (default RELAY_GUARD_WAIT=1) is covered by tests/test-relay-guard.sh.
+export RELAY_GUARD_WAIT=0
 : > "$RELAY_SYNC_LOG"
 
 run_runner() {
@@ -226,7 +229,7 @@ add_task target-out "- Executor: paseo
 - Target directory: $TMP/outside"
 clear_calls
 out=$(run_runner 2>&1 || true)
-contains "$out" 'outside the allowlist'
+contains "$out" 'outside the configured allowlist'
 test "$(status_remote target-out)" = blocked || fail 'outside allowlist was not blocked remotely'
 test "$(run_count)" = 0 || fail 'executor ran outside the allowlist'
 test ! -d "$GIT_DIR/agent-relay-task-locks/target-out" || fail 'blocked target task left a task lock'

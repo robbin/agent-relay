@@ -23,6 +23,39 @@ Git credentials. A skill is a behavior guide, not a sandbox or permission bounda
   prompt forbids out-of-scope paths and prepare-only dangerous actions, but
   those are instructions to an agent; host approvals remain the real control.
   Use an executor with its own sandbox or approval policy where available.
+- Runner safety guards (each blocks when it matches or cannot complete;
+  recorded as `blocked` with pattern or path names only, never the matched text):
+  1. Target directory: a raw value with a `..` segment is rejected; the real
+     path (`cd && pwd -P`, so symlinks cannot escape) must be inside the task
+     checkout (but not its `.git` directory), an entry of `RELAY_WORKSPACE_ALLOWLIST`, or an existing
+     first-level project under `RELAY_PROJECTS_ROOT` (not the root itself).
+     A task without a target directory runs with the checkout as its cwd.
+  2. Task body scan, before the task is claimed: everything except the
+     metadata headers the runner validates itself (`Task ID`, `Status`,
+     `Executor`, `Role`, `Target directory`) is matched — including any
+     pre-filled `## Result` text, since a pending task's Result should be empty — against sensitive patterns: `.ssh`, `id_rsa`,
+     private keys, `.env`, Keychain, `auth.json`, secrets/credentials/passwords,
+     narrow token forms (access/auth/api/refresh/bearer/bot token, `token=`),
+     `.aws`, `.gnupg`, cookies, `scp`/`rsync host:`, `curl`/`wget` uploads,
+     `nc`, paste sites. The executor is not started.
+  3. Output gate (`RELAY_GUARD_WAIT=1`, default): the executor commits but does
+     not push; its own pushes are disabled on a best-effort basis by an
+     invalid `remote.origin.pushurl` (set in the checkout config while the
+     executor runs, unless you configured a pushurl yourself, and injected
+     through `GIT_CONFIG_*` env), removed again afterwards. The
+     runner scans exactly what would be pushed — every commit in
+     `origin/main..HEAD`: commit messages and all added lines, binary content
+     included, merge resolutions, and blobs deleted again by a later commit — for likely secrets
+     (GitHub/OpenAI/Slack/AWS tokens, private key blocks, long hex/base64
+     strings, Bearer values, `*KEY/TOKEN/SECRET = ...`). Clean output is
+     pushed by the runner (that exact scanned commit) under the shared Git
+     lock; a hit is recorded as `blocked` in a local-only commit, `PAUSED` is
+     written and nothing is pushed. Uncommitted leftovers are never pushed.
+     `RELAY_GUARD_WAIT=0` disables this gate.
+  Pattern scans are a safety net, not a guarantee: they can miss obfuscated or
+  unusual secrets, an executor with its own credentials or a cleared
+  environment can still push directly, and legitimate tasks that mention
+  sensitive words get blocked.
 - Executor role presets and their notes are local configuration. A task's
   `- Role:` value only selects an existing preset by exact name; an unknown
   role or unavailable provider becomes blocked, never a fallback to another

@@ -91,7 +91,12 @@ Common runner settings (all optional):
 - `RELAY_PASEO_WORKSPACE` — optional workspace identifier passed to the CLI.
 - `RELAY_PASEO_CONFIG` — optional role preset file (read-only, default
   `~/.paseo/config.json`). Only `daemon.agentProfiles` is read, by exact name.
-- `RELAY_MIN_SECONDS_AFTER_SYNC` (120), `RELAY_MAX_SYNC_AGE` (1500) — timing gate.
+- `RELAY_PROJECTS_ROOT=/abs/projects` — optional: any existing first-level
+  directory under it (and its subdirectories) is allowed; the root itself is not.
+- `RELAY_GUARD_WAIT=1|0` — default `1`: wait for the executor, scan its output
+  for likely secrets and push only if clean. `0` restores asynchronous dispatch
+  (`--no-wait`; the executor pushes itself and the output gate is skipped).
+- `RELAY_MIN_SECONDS_AFTER_SYNC` (30), `RELAY_MAX_SYNC_AGE` (1500) — timing gate.
 - `RELAY_RUNNER_DRY_RUN=1` — log the intended action without changing files,
   starting the task executor or leaving a task lock. Read-only probes such as
   the provider availability check may still run.
@@ -138,7 +143,12 @@ replaced, and dispatch failure is recorded as blocked with a reason appended at
 the end of the file. Keep `## Result` as the last section in task files; a
 blocked note appended after later sections would land in the wrong place.
 
-The runner does not wait for completion and does not verify the final result.
+With `RELAY_GUARD_WAIT=1` (default) the runner waits for the executor, runs the
+output gate, releases the task lock and pushes the executor's commits only if
+no likely secret is found. On a hit it records `blocked` in a local-only commit,
+writes `PAUSED` and stops; inspect `git log origin/main..HEAD`, clean up, then
+delete `PAUSED`. With `RELAY_GUARD_WAIT=0` the runner does not wait for
+completion and does not verify the final result.
 Uninstall removes both jobs and scripts; it preserves the checkout, logs, state
 directory and locks.
 

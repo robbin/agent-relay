@@ -28,6 +28,8 @@
     RELAY_DEFAULT_PROVIDER=<provider[/model]>
     RELAY_DEFAULT_THINKING=<thinking option>
     RELAY_WORKSPACE_ALLOWLIST=/abs/dir:/abs/other-dir
+    RELAY_PROJECTS_ROOT=/abs/projects-root
+    RELAY_GUARD_WAIT=1
     RELAY_PASEO_CONFIG=/absolute/path/to/config.json
     RELAY_RUNNER_DRY_RUN=1
 -->

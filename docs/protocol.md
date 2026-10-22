@@ -91,8 +91,13 @@ Without the field, the task keeps the manual view/takeover flow.
   neither retried nor replaced; recovery stays an explicit operator action.
 - The dispatched agent must stay inside the task scope and allowlist, prepare
   (not perform) publishing, deletion, deployment, permission/firewall changes
-  and external messages, write Result, update status, push only authorized
-  files, and release its own task lock.
+  and external messages, write Result, update status, commit only authorized
+  files, and release its own task lock. With the output gate on (default) the
+  agent does not push; the runner pushes after scanning for likely secrets.
+- Before dispatch the runner rejects target directories with `..` or outside
+  the allowlist (real path), and blocks tasks whose body matches sensitive
+  patterns (credentials, key files, upload commands). Only the validated
+  metadata headers are skipped; body fields such as `- Task:` are scanned.
 
 ## Git and locking — both endpoints
 
