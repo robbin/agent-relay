@@ -94,7 +94,7 @@ run_runner() {
   env RELAY_GUARD_WAIT="${RELAY_GUARD_WAIT:-1}" HOME="$W/home" PATH="$W/bin:$PATH" \
     RELAY_LOG="$W/logs/runner.log" RELAY_SYNC_LOG="$W/logs/sync.log" RELAY_STATE_DIR="$W/state" \
     RELAY_EXECUTOR_BIN="$W/bin/paseo" RELAY_DEFAULT_PROVIDER=pi/test-model \
-    RELAY_PUSH_RETRY_DELAY=0 RELAY_LOCK_RECHECK_SECONDS=0 \
+    RELAY_PUSH_RETRY_DELAY=0 RELAY_GITLOCK_TRIES=2 RELAY_GITLOCK_SLEEP=0 \
     RELAY_WORKSPACE_ALLOWLIST="$W/allowed" RELAY_PROJECTS_ROOT="$W/projects" \
     FAKE_CALLS="$W/calls" FAKE_REPO="$REPO_DIR" FAKE_GITDIR="$GITDIR" FAKE_ID="$TASK_ID" \
     FAKE_MODE="$FAKE_MODE" FAKE_SECRET="$FAKE_SECRET" \
@@ -208,12 +208,13 @@ echo "== output: fake ghp_ token in Result is blocked and nothing is pushed"
 setup_case secret-result; FAKE_MODE=secret; write_task g-leak '' 'Count the task files.'
 run_runner; rc=$?
 check "exit non-zero (got $rc)" test "$rc" -ne 0
-check 'local status is blocked' local_status_is blocked
+check 'the executor result is kept locally, not rewritten' local_status_is done
 check 'origin status still accepted' status_is accepted
 check_not 'secret not on origin' origin_has "$FAKE_SECRET"
 check_not 'executor commit not pushed' origin_log_has 'Complete task g-leak'
 check 'PAUSED marker written' test -f "$W/state/PAUSED"
-check 'log records the gate' grep -q 'guard 3 blocked' "$W/logs/runner.log"
+check 'execution evidence kept for verification' test -d "$GITDIR/agent-relay-execution"
+check 'log records the gate' grep -q 'push blocked' "$W/logs/runner.log"
 check_not 'log does not echo the secret' grep -q "$FAKE_SECRET" "$W/logs/runner.log"
 check_not 'PAUSED does not echo the secret' grep -q "$FAKE_SECRET" "$W/state/PAUSED"
 check 'task lock released' lock_gone
@@ -225,7 +226,7 @@ setup_case secret-file; FAKE_MODE=secretfile; write_task g-leak2 '' 'Count the t
 run_runner; rc=$?
 check "exit non-zero (got $rc)" test "$rc" -ne 0
 check 'origin status still accepted' status_is accepted
-check 'blocked note names the file' grep -q 'notes.txt' "$REPO_DIR/tasks/to-local/g-leak2.md"
+check 'the pause marker names the file' grep -q 'notes.txt' "$W/state/PAUSED"
 check 'PAUSED marker written' test -f "$W/state/PAUSED"
 
 gate_blocks() { # $1=case $2=mode $3=label
@@ -262,11 +263,12 @@ run_runner
 check 'executor push was refused' grep -qx refused "$W/calls.push"
 check 'runner pushed after the gate' status_is done
 
-echo "== RELAY_GUARD_WAIT=0: legacy async dispatch keeps --no-wait"
+echo "== RELAY_GUARD_WAIT=0 (legacy async dispatch) is refused"
 setup_case nowait; write_task g-nowait '' 'Count the task files.'
-RELAY_GUARD_WAIT=0 run_runner
-check 'executor got --no-wait' grep -qx 'ARG:--no-wait' "$W/calls"
-check_not 'prompt does not forbid pushing' grep -q 'Do NOT git push' "$W/calls"
+RELAY_GUARD_WAIT=0 run_runner; rc=$?
+check "exit non-zero (got $rc)" test "$rc" -ne 0
+check 'no dispatch without a final exit status' test ! -e "$W/calls"
+check 'the task stays pending on origin' status_is pending
 
 echo
 echo "PASS: $PASS    FAIL: $FAIL"

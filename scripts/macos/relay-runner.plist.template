@@ -30,6 +30,8 @@
     RELAY_WORKSPACE_ALLOWLIST=/abs/dir:/abs/other-dir
     RELAY_PROJECTS_ROOT=/abs/projects-root
     RELAY_GUARD_WAIT=1
+    RELAY_GUARD_BLOB_MAX=1048576
+    RELAY_GUARD_BLOB_ALLOW=docs/img/*.png
     RELAY_PASEO_CONFIG=/absolute/path/to/config.json
     RELAY_RUNNER_DRY_RUN=1
 -->
@@ -91,7 +93,9 @@
   <key>ThrottleInterval</key>
   <integer>60</integer>
 
-  <!-- The executor runs without waiting and may outlive the runner process. -->
+  <!-- The runner waits for the executor so it can record the final exit status,
+       verify the result and push it. AbandonProcessGroup keeps that executor
+       alive instead of killing it if launchd stops the runner mid-round. -->
   <key>AbandonProcessGroup</key>
   <true/>
 </dict>

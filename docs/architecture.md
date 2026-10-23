@@ -43,9 +43,11 @@ Round-trip (`- Receipt: required`): receiver ──> tasks/receipts/to-cloud ─
 The runner serializes work with a private run lock, the shared Git lock for its
 short claim/blocked commits, and the per-task lock used by manual takeover. It
 refuses to act when the checkout is dirty, off main, diverged from origin/main,
-has an unfinished Git operation, has an unreleased task lock, or when the sync
-log is too recent or too old. These checks preserve the local Git scene rather
-than repairing it automatically.
+has an unfinished Git operation, has an unreleased task lock, still holds local
+execution evidence, or when the sync log is too recent or too old. These checks
+preserve the local Git scene rather than repairing it automatically: locks are
+never reclaimed, and a run whose result cannot be verified stays local behind
+`PAUSED` and `<git-dir>/agent-relay-execution/` until an operator looks.
 
 ## Harmless end-to-end acceptance
 
@@ -66,9 +68,10 @@ Use a disposable private task repository and explicit user authorization.
    changing files. Then authorize exactly one harmless to-local task with
    `- Executor:` matching the configured adapter and a `- Target directory:`
    inside the configured allowlist. Confirm: accepted was pushed before
-   dispatch, a dispatch marker and task lock existed, the executor wrote Result,
-   updated done/blocked, and released its own task lock. Do not use a task with
-   external side effects for this check.
+   dispatch, a dispatch marker and local execution evidence existed, the runner
+   waited for the executor, the executor wrote Result and updated done/blocked,
+   and the guarded push carried exactly the scanned commit. Do not use a task
+   with external side effects for this check.
 7. Confirm that a to-local task without `- Executor:` is still untouched by the
    runner after this test.
 8. If round-trip receipts interest you, send one harmless task with

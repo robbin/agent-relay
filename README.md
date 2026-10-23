@@ -47,10 +47,16 @@ the setup guide for each endpoint before proposing or making installation change
   automatically. Tasks without that field keep the manual view/takeover flow.
 - The runner is off by default. It never fetches or pulls, runs at most one task
   at a time, and refuses dirty, divergent or locked checkouts.
-- A dispatch failure is recorded as `blocked` with a reason. The runner never
-  retries or substitutes another role/provider, and it never performs
-  high-risk actions itself: the dispatched agent must prepare publishing,
-  deletion, deployment, permission changes and external messages for approval.
+- A dispatch failure is recorded as `blocked` with a reason, plus a receipt when
+  the task asked for one. The runner never retries or substitutes another
+  role/provider, and it never performs high-risk actions itself: the dispatched
+  agent must prepare publishing, deletion, deployment, permission changes and
+  external messages for approval.
+- Only verified results reach the remote. Before dispatch the runner records
+  local execution evidence; after dispatch it accepts only the terminal
+  transition of that one task, re-checks the receipt pair and pushes exactly the
+  commit it scanned. Unknown or failed results stay local behind `PAUSED`, and
+  deleting `PAUSED` alone never authorizes a push.
 
 ### Safety guards
 
@@ -61,15 +67,16 @@ The runner applies three fail-closed guards (details in
    real path (symlinks resolved) must be inside the task checkout,
    `RELAY_WORKSPACE_ALLOWLIST`, or an existing project directly under
    `RELAY_PROJECTS_ROOT`.
-2. **Task body scan** — before claiming, the task text (all but the validated
-   metadata headers) is checked for sensitive patterns such as `.ssh`, private keys,
-   `.env`, Keychain, credential/token assignments and upload commands
-   (`curl -F`, `scp host:`...). A hit marks the task `blocked` without starting
-   the executor and without echoing the text.
-3. **Output gate** (`RELAY_GUARD_WAIT=1`, default) — the executor only commits;
-   the runner waits, scans every commit it would push (messages and added
-   lines) for likely secrets, and pushes only if clean. A hit records `blocked` in a local-only
-   commit, writes the `PAUSED` marker and pushes nothing.
+2. **Task body scan** — after the claim and before dispatch, the task text (all
+   but the validated metadata headers) is checked for sensitive patterns such as
+   `.ssh`, private keys, `.env`, Keychain, credential/token assignments and
+   upload commands (`curl -F`, `scp host:`...). A hit marks the task `blocked`
+   without starting the executor and without echoing the text.
+3. **Output gate** (`RELAY_GUARD_WAIT=1`, the only supported mode) — the
+   executor only commits; the runner waits for it, then scans every commit it
+   would push (commit metadata and every changed blob; large or binary files
+   fail closed) for likely secrets, and pushes only that exact commit if clean.
+   A hit writes the `PAUSED` marker and pushes nothing.
 
 ## What's included
 

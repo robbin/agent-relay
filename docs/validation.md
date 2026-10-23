@@ -20,6 +20,47 @@ Passed in disposable local Git repositories:
   passed on ubuntu-latest and macos-latest. The installer test still mocks launchctl
   on macOS and skips on Linux; this does not constitute a live timer installation.
 
+## Optional relay-runner candidate, 2026-10-23 (hardened runner)
+
+Passed in disposable local Git repositories with a mocked executor; no macOS
+job was registered and no real agent, model or webhook was used:
+- `tests/test-relay-runner.sh` covers dry-run, claim with a narrow task-only
+  commit and push, dispatch arguments and prompt (`--cwd`, provider/thinking,
+  no `--no-wait`, prepare-only rule, no-push rule), the dispatch marker, the
+  one-task-at-a-time gate, non-opted-in/blocked/accepted filtering, the dirty,
+  sync-timing, behind-origin and expected-origin gates, the directory allowlist,
+  executor failure, role/provider presets, the `command` adapter, the pause
+  marker, a run lock the runner did not create, and a filename/ID mismatch.
+- `tests/test-relay-guard.sh` covers guard 1 (`..`, symlink escape, projects
+  root), guard 2 (body scan, non-ASCII wording, pre-filled Result, embedded
+  Result heading, no false positive on "token count") and guard 3 (secret in
+  Result/other file/commit message/binary/merge/deleted blob, executor's own
+  push refused, `RELAY_GUARD_WAIT=0` refused).
+- `tests/test-relay-runner-fixes.sh` covers the failure path through the output
+  gate, per-commit/per-blob scanning, 1 MiB and binary fail-closed handling with
+  `RELAY_GUARD_BLOB_ALLOW`, shared-lock and exact-path commits, task ID
+  validation, blocked receipts, and executor arguments.
+- `tests/test-relay-runner-regressions.sh` covers merge-only blobs, receipts
+  that disagree with the task (reverse, missing, removed requirement, wrong
+  identity), lock re-validation (branch switch, status change), HEAD moving
+  after the scan, grep/git error injection failing closed, odd file names, and
+  the pause/lock race.
+- `tests/test-relay-runner-safety.sh` covers cross-process execution evidence
+  (`approved-head`, retry after a network failure, quarantined `hold/`), a
+  single-process cleanup failure, injected `mkdir`/`rmdir` errors, uncommitted
+  executor output, divergence, `write_pause` failure modes (directory, dangling
+  symlink, missing parent, concurrent creation), run-lock variants that are
+  never reclaimed, the refusal of asynchronous dispatch, and 14 probes where the
+  executor drags another control file into its commit (other task, deletion,
+  rename, reverse receipt, to-cloud change, protocol edit, receipt removal) —
+  each refuses the whole push and keeps the evidence.
+- `bash -n` passes for every shipped script and test.
+
+Not verified for this candidate: a real Paseo dispatch, a live role preset file,
+a real launchd schedule, an end-to-end agent that writes Result and commits, and
+cross-process contention with the real sync timer beyond the mocked cases. These
+are mocked tests, not a live integration test.
+
 ## Optional relay-runner candidate, 2026-10-22
 
 Passed in disposable local Git repositories on Linux (mocked executor, no macOS

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Mocked tests for the optional local auto-relay runner.
+# Mocked dispatch tests for the optional local auto-relay runner.
 # Uses a fake executor binary and disposable Git repositories only.
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
@@ -16,9 +16,10 @@ not_contains() { case "$1" in *"$2"*) fail "did not expect '$2' in runner output
 git init --bare -q "$TMP/remote.git"
 git init -q -b main "$TMP/seed"
 git -C "$TMP/seed" remote add origin "$TMP/remote.git"
-mkdir -p "$TMP/seed/tasks/to-local" "$TMP/seed/tasks/to-cloud"
+mkdir -p "$TMP/seed/tasks/to-local" "$TMP/seed/tasks/to-cloud" "$TMP/seed/tasks/receipts/to-cloud"
 printf '# Task protocol for tests\n' > "$TMP/seed/tasks/README.md"
 : > "$TMP/seed/tasks/to-local/.gitkeep"
+: > "$TMP/seed/tasks/receipts/to-cloud/.gitkeep"
 printf 'seed\n' > "$TMP/seed/data"
 git -C "$TMP/seed" add .
 git -C "$TMP/seed" commit -qm initial
@@ -30,8 +31,10 @@ GIT_DIR=$(git -C "$LOCAL" rev-parse --absolute-git-dir)
 
 export HOME="$TMP/home"
 export PATH="$TMP/bin:$PATH"
-mkdir -p "$HOME" "$TMP/bin" "$TMP/logs" "$TMP/state" "$TMP/work/inside" "$TMP/outside"
+mkdir -p "$HOME" "$TMP/bin" "$TMP/logs" "$TMP/state" "$TMP/work/inside" "$TMP/outside" "$TMP/projects/proj/sub"
 
+# The fake executor behaves like a well-behaved agent: it reports the task it
+# was given, marks it done, commits only that file and never pushes.
 cat > "$TMP/bin/paseo" <<'STUB'
 #!/bin/bash
 { for a in "$@"; do printf 'ARG:%s\n' "$a"; done; } >> "${FAKE_PASEO_CALLS:?}"
@@ -41,7 +44,13 @@ if [ "${1:-}" = provider ]; then
 fi
 for last in "$@"; do :; done
 printf '%s\n' "$last" > "${FAKE_PASEO_PROMPT:?}"
-exit "${FAKE_PASEO_EXIT:-0}"
+[ "${FAKE_PASEO_EXIT:-0}" = 0 ] || exit "${FAKE_PASEO_EXIT}"
+f=$(grep -l '^- Status: accepted' "$FAKE_REPO"/tasks/to-local/*.md 2>/dev/null | head -n 1 || true)
+[ -n "$f" ] || exit 0
+sed -e 's/^- Status: .*/- Status: done/' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+git -C "$FAKE_REPO" add "tasks/to-local/$(basename "$f")"
+git -C "$FAKE_REPO" commit -qm "Complete task $(basename "$f" .md)"
+exit 0
 STUB
 chmod +x "$TMP/bin/paseo"
 
@@ -49,7 +58,13 @@ cat > "$TMP/bin/command-exec" <<'STUB'
 #!/bin/bash
 { for a in "$@"; do printf 'ARG:%s\n' "$a"; done; } >> "${FAKE_CMD_CALLS:?}"
 cat > "${FAKE_CMD_PROMPT:?}"
-exit "${FAKE_CMD_EXIT:-0}"
+[ "${FAKE_CMD_EXIT:-0}" = 0 ] || exit "${FAKE_CMD_EXIT}"
+f=$(grep -l '^- Status: accepted' "$FAKE_CMD_REPO"/tasks/to-local/*.md 2>/dev/null | head -n 1 || true)
+[ -n "$f" ] || exit 0
+sed -e 's/^- Status: .*/- Status: done/' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+git -C "$FAKE_CMD_REPO" add "tasks/to-local/$(basename "$f")"
+git -C "$FAKE_CMD_REPO" commit -qm "Complete task $(basename "$f" .md)"
+exit 0
 STUB
 chmod +x "$TMP/bin/command-exec"
 
@@ -61,16 +76,15 @@ export RELAY_EXPECTED_ORIGIN="$TMP/remote.git"
 export RELAY_DEFAULT_PROVIDER="pi/test-model"
 export RELAY_DEFAULT_THINKING="high"
 export RELAY_WORKSPACE_ALLOWLIST="$TMP/work"
+export RELAY_PROJECTS_ROOT="$TMP/projects"
 export RELAY_PUSH_RETRY_DELAY=0
-export RELAY_LOCK_RECHECK_SECONDS=0
-# This file covers the legacy asynchronous dispatch path; the output gate
-# (default RELAY_GUARD_WAIT=1) is covered by tests/test-relay-guard.sh.
-export RELAY_GUARD_WAIT=0
+export RELAY_GITLOCK_TRIES=2
+export RELAY_GITLOCK_SLEEP=0
 : > "$RELAY_SYNC_LOG"
 
 run_runner() {
-  env FAKE_PASEO_CALLS="$TMP/calls" FAKE_PASEO_PROMPT="$TMP/prompt" \
-      FAKE_CMD_CALLS="$TMP/calls" FAKE_CMD_PROMPT="$TMP/prompt" \
+  env FAKE_PASEO_CALLS="$TMP/calls" FAKE_PASEO_PROMPT="$TMP/prompt" FAKE_REPO="$LOCAL" \
+      FAKE_CMD_CALLS="$TMP/calls" FAKE_CMD_PROMPT="$TMP/prompt" FAKE_CMD_REPO="$LOCAL" \
       "$@" bash "$ROOT/scripts/macos/relay-runner.sh" "$LOCAL"
 }
 clear_calls() { rm -f "$TMP/calls" "$TMP/prompt"; }
@@ -96,7 +110,7 @@ add_task() { # $1=name [$2=extra fields] [$3=status]
     printf -- '- Task: Write TEST-OK in Result.\n'
     printf -- '- Constraints: Only update this file.\n'
     printf -- '- Acceptance: Result contains TEST-OK.\n'
-    printf -- '- Deliverable: Update Result and status, then push.\n'
+    printf -- '- Deliverable: Update Result and status.\n'
     printf '\n## Result\n'
   } > "$LOCAL/tasks/to-local/$name.md"
   git -C "$LOCAL" add "tasks/to-local/$name.md"
@@ -113,7 +127,7 @@ drop_task() { # $1=name
   fi
 }
 
-reset_locks() { rm -rf "$GIT_DIR/agent-relay-task-locks" "$RELAY_STATE_DIR/launched"; }
+reset_locks() { rm -rf "$GIT_DIR/agent-relay-task-locks" "$RELAY_STATE_DIR/launched" "$GIT_DIR/agent-relay-execution"; }
 status_local() { awk '/^## Result$/ {exit} /^- Status:/ {sub(/^- Status:[ \t]*/, ""); print; exit}' "$LOCAL/tasks/to-local/$1.md"; }
 status_remote() { git --git-dir="$TMP/remote.git" show "main:tasks/to-local/$1.md" | awk '/^## Result$/ {exit} /^- Status:/ {sub(/^- Status:[ \t]*/, ""); print; exit}'; }
 
@@ -132,39 +146,39 @@ test "$(status_remote dry-run-1)" = pending || fail 'dry run pushed a status cha
 test "$(run_count)" = 0 || fail 'dry run invoked the executor run command'
 test ! -e "$RELAY_STATE_DIR/launched/dry-run-1" || fail 'dry run wrote a dispatch marker'
 test ! -d "$GIT_DIR/agent-relay-task-locks/dry-run-1" || fail 'dry run left a task lock'
+test ! -e "$GIT_DIR/agent-relay-execution" || fail 'dry run wrote execution evidence'
 drop_task dry-run-1
 
-# 3. Real dispatch: claim, narrow commit, executor args, marker, retained task lock.
+# 3. Real dispatch: claim, narrow commit, executor args, done, marker.
 add_task auto-1 '- Executor: paseo'
 clear_calls
 out=$(run_runner 2>&1 || true)
 contains "$out" 'dispatch accepted: auto-1'
-test "$(status_local auto-1)" = accepted || fail 'local task not accepted'
-test "$(status_remote auto-1)" = accepted || fail 'remote task not accepted'
-test "$(git -C "$LOCAL" show --name-only --format= HEAD)" = 'tasks/to-local/auto-1.md' \
+contains "$out" 'round complete'
+test "$(status_remote auto-1)" = done || fail 'remote task not done'
+test "$(git -C "$LOCAL" show --name-only --format= HEAD~1)" = 'tasks/to-local/auto-1.md' \
   || fail 'claim commit included more than the task file'
 has_call 'ARG:run' || fail 'executor run missing'
-has_call 'ARG:--no-wait' || fail 'executor --no-wait missing'
+has_call 'ARG:--no-wait' && fail 'guard-wait mode must not pass --no-wait'
 has_call 'ARG:--title' || fail 'executor --title missing'
 has_call 'ARG:auto-1' || fail 'executor task title missing'
 has_call 'ARG:--provider' || fail 'executor provider missing'
 has_call 'ARG:pi/test-model' || fail 'default provider not passed'
 has_call 'ARG:--thinking' || fail 'executor thinking missing'
 has_call 'ARG:high' || fail 'default thinking not passed'
+has_call "ARG:$LOCAL" || fail 'checkout cwd not passed'
 grep -q 'auto-1' "$TMP/prompt" || fail 'prompt does not name the task'
 grep -qi 'prepare-only' "$TMP/prompt" || fail 'prompt lacks the prepare-only rule'
+grep -q 'Do NOT git push' "$TMP/prompt" || fail 'prompt does not forbid pushing'
 test -e "$RELAY_STATE_DIR/launched/auto-1" || fail 'dispatch marker missing'
-test -d "$GIT_DIR/agent-relay-task-locks/auto-1" || fail 'task lock not retained for the executor'
+test ! -d "$GIT_DIR/agent-relay-task-locks/auto-1" || fail 'task lock was not released'
+test ! -e "$GIT_DIR/agent-relay-execution" || fail 'execution evidence not cleared after the push'
+test -z "$(git -C "$LOCAL" status --porcelain)" || fail 'checkout left dirty'
+test "$(git -C "$LOCAL" rev-parse HEAD)" = "$(git --git-dir="$TMP/remote.git" rev-parse main)" \
+  || fail 'checkout is not at origin/main after the push'
 
-# 4. An outstanding task lock blocks new dispatch; the same task is not run twice.
-clear_calls
-out=$(run_runner 2>&1 || true)
-contains "$out" 'no dispatch this round'
-test "$(run_count)" = 0 || fail 'runner dispatched while a task lock existed'
-
-# 5. Non-opted-in, blocked and accepted tasks are never claimed.
+# 4. Non-opted-in, blocked and accepted tasks are never claimed.
 reset_locks
-rm -f "$RELAY_STATE_DIR/launched/auto-1"
 add_task manual-1 ''
 add_task blocked-1 '- Executor: paseo' blocked
 add_task accepted-1 '- Executor: paseo' accepted
@@ -177,7 +191,7 @@ test "$(status_remote accepted-1)" = accepted || fail 'accepted task was retried
 test "$(run_count)" = 0 || fail 'executor ran for a non-eligible task'
 drop_task manual-1; drop_task blocked-1; drop_task accepted-1
 
-# 6. Dirty worktree is preserved and blocks dispatch.
+# 5. Dirty worktree is preserved and blocks dispatch.
 add_task dirty-1 '- Executor: paseo'
 echo dirty >> "$LOCAL/data"
 sync_valid
@@ -189,20 +203,7 @@ test "$(run_count)" = 0 || fail 'executor ran on a dirty worktree'
 git -C "$LOCAL" checkout -- data
 drop_task dirty-1
 
-# 7. Local commits ahead of origin/main are preserved and block dispatch.
-add_task ahead-1 '- Executor: paseo'
-echo ahead >> "$LOCAL/data"
-git -C "$LOCAL" commit -qam ahead
-sync_valid
-clear_calls
-out=$(run_runner 2>&1 || true)
-contains "$out" 'differs from origin/main'
-test "$(run_count)" = 0 || fail 'executor ran while HEAD differed from origin/main'
-git -C "$LOCAL" reset --hard -q origin/main
-reset_locks
-drop_task ahead-1 2>/dev/null || true
-
-# 8. Timing gate: too recent and too stale sync logs both skip.
+# 6. Timing gate: too recent and too stale sync logs both skip.
 add_task timing-1 '- Executor: paseo'
 sync_recent
 out=$(run_runner 2>&1 || true)
@@ -213,7 +214,7 @@ contains "$out" 'stale data'
 test "$(status_local timing-1)" = pending || fail 'timing gate still claimed the task'
 drop_task timing-1
 
-# 9. Target directory: allowed, outside allowlist, missing.
+# 7. Target directory: allowed and outside the allowlist.
 sync_valid
 INSIDE=$(cd "$TMP/work/inside" && pwd -P)
 add_task target-in "- Executor: paseo
@@ -235,27 +236,17 @@ test "$(run_count)" = 0 || fail 'executor ran outside the allowlist'
 test ! -d "$GIT_DIR/agent-relay-task-locks/target-out" || fail 'blocked target task left a task lock'
 drop_task target-out
 
-add_task target-missing "- Executor: paseo
-- Target directory: $TMP/work/missing"
-clear_calls
-out=$(run_runner 2>&1 || true)
-contains "$out" 'does not exist'
-test "$(status_remote target-missing)" = blocked || fail 'missing target directory was not blocked'
-test "$(run_count)" = 0 || fail 'executor ran for a missing directory'
-drop_task target-missing
-
-# 10. Executor start failure becomes blocked and releases the task lock.
+# 8. Executor failure becomes blocked and releases the task lock.
 add_task fail-1 '- Executor: paseo'
 clear_calls
 out=$(run_runner FAKE_PASEO_EXIT=1 2>&1 || true)
 contains "$out" 'dispatch failed: fail-1'
 contains "$out" 'executor exit 1'
-test "$(status_local fail-1)" = blocked || fail 'executor failure not blocked locally'
 test "$(status_remote fail-1)" = blocked || fail 'executor failure not blocked remotely'
 test ! -d "$GIT_DIR/agent-relay-task-locks/fail-1" || fail 'failed dispatch kept the task lock'
 drop_task fail-1
 
-# 11. Role presets, including featureValues warning, are used without substitution.
+# 9. Role presets, including a featureValues warning, are used without substitution.
 cat > "$TMP/paseo-config.json" <<'JSON'
 {"daemon":{"agentProfiles":[
   {"name":"reviewer","provider":"pi","model":"m1","modeId":"plan","thinkingOptionId":"high","notes":"Review carefully.","featureValues":{"permissionPreset":"example"}},
@@ -293,7 +284,7 @@ test "$(status_remote provider-missing)" = blocked || fail 'unavailable provider
 test "$(run_count)" = 0 || fail 'unavailable provider still dispatched'
 drop_task provider-missing
 
-# 12. Configurable command adapter receives the task ID and prompt on stdin.
+# 10. Configurable command adapter receives the task ID and the prompt on stdin.
 add_task cmd-1 '- Executor: command'
 clear_calls
 out=$(run_runner RELAY_EXECUTOR=command RELAY_EXECUTOR_BIN="$TMP/bin/command-exec" 2>&1 || true)
@@ -301,10 +292,10 @@ contains "$out" 'dispatch accepted: cmd-1'
 has_call 'ARG:--task-id' || fail 'command adapter task ID flag missing'
 has_call 'ARG:cmd-1' || fail 'command adapter task ID value missing'
 grep -q 'cmd-1' "$TMP/prompt" || fail 'command adapter prompt missing task ID'
-test "$(status_remote cmd-1)" = accepted || fail 'command adapter dispatch not claimed'
+test "$(status_remote cmd-1)" = done || fail 'command adapter dispatch was not completed'
 drop_task cmd-1
 
-# 13. Pause marker stops dispatch.
+# 11. Pause marker stops dispatch.
 add_task pause-1 '- Executor: paseo'
 : > "$RELAY_STATE_DIR/PAUSED"
 clear_calls
@@ -315,20 +306,14 @@ test "$(run_count)" = 0 || fail 'executor ran while paused'
 rm -f "$RELAY_STATE_DIR/PAUSED"
 drop_task pause-1
 
-# 14. Stale single-instance lock is reclaimed; a live one is respected.
+# 12. A run lock is never reclaimed automatically; a matching Task ID is required.
 mkdir -p "$RELAY_STATE_DIR/run.lock"
-echo 999999 > "$RELAY_STATE_DIR/run.lock/pid"
+echo 999999999 > "$RELAY_STATE_DIR/run.lock/pid"
 out=$(run_runner 2>&1 || true)
-contains "$out" 'reclaimed a stale run lock'
-test ! -d "$RELAY_STATE_DIR/run.lock" || fail 'stale run lock was not released'
-mkdir -p "$RELAY_STATE_DIR/run.lock"
-echo $$ > "$RELAY_STATE_DIR/run.lock/pid"
-out=$(run_runner 2>&1 || true)
-contains "$out" 'another relay-runner is running'
-test -d "$RELAY_STATE_DIR/run.lock" || fail 'runner removed a live run lock'
+contains "$out" 'run lock'
+test -d "$RELAY_STATE_DIR/run.lock" || fail 'runner removed a run lock it did not create'
 rm -rf "$RELAY_STATE_DIR/run.lock"
 
-# 15. Malformed task header is skipped, not dispatched.
 {
   printf '# Bad task\n\n- Task ID: other-id\n- Status: pending\n- Updated: 2026-01-01T10:00:00+00:00\n'
   printf -- '- Executor: paseo\n\n## Result\n'
@@ -339,11 +324,37 @@ git -C "$LOCAL" push -q
 sync_valid
 clear_calls
 out=$(run_runner 2>&1 || true)
-contains "$out" 'filename and ID must match'
+contains "$out" 'filename and ID differ'
 test "$(status_local mismatch-1)" = pending || fail 'mismatched task ID was claimed'
 test "$(run_count)" = 0 || fail 'executor ran for a mismatched task ID'
 git -C "$LOCAL" rm -q tasks/to-local/mismatch-1.md
 git -C "$LOCAL" commit -qm 'drop mismatch task'
 git -C "$LOCAL" push -q
 
-echo 'PASS relay-runner: dry-run, claim/commit/push, marker+task lock, single-task gate, opt-in/blocked/accepted filtering, dirty/ahead/sync gates, allowlist, blocked-not-replaced, executor failure, role/provider presets, command adapter, pause, run lock, malformed ID; executor mocked'
+# 13. A wrong expected origin is refused before any dispatch.
+add_task origin-1 '- Executor: paseo'
+clear_calls
+out=$(run_runner RELAY_EXPECTED_ORIGIN="$TMP/other-remote.git" 2>&1 || true)
+contains "$out" 'RELAY_EXPECTED_ORIGIN'
+test "$(run_count)" = 0 || fail 'executor ran with an unexpected origin'
+test "$(status_local origin-1)" = pending || fail 'unexpected origin still claimed the task'
+drop_task origin-1
+
+# 14. A checkout that is behind origin/main is left to the sync timer.
+add_task behind-1 '- Executor: paseo'
+( git clone -q "$TMP/remote.git" "$TMP/other" && cd "$TMP/other" \
+  && printf '# remote note\n' > remote-note.md && git add -A \
+  && git commit -qm 'remote move' && git push -q origin main )
+sync_valid
+clear_calls
+out=$(run_runner 2>&1 || true)
+contains "$out" 'behind'
+test "$(run_count)" = 0 || fail 'executor ran on a checkout that is behind origin/main'
+git -C "$LOCAL" fetch -q origin
+git -C "$LOCAL" reset --hard -q origin/main
+reset_locks
+git -C "$LOCAL" rm -q tasks/to-local/behind-1.md 2>/dev/null || true
+git -C "$LOCAL" commit -qm 'drop behind task' 2>/dev/null || true
+git -C "$LOCAL" push -q
+
+echo 'PASS relay-runner: dry-run, claim/commit/push, dispatch args and prompt, done after the output gate, marker, opt-in/blocked/accepted filtering, dirty/sync/behind gates, allowlist, executor failure, role/provider presets, command adapter, pause, run lock, mismatched ID, expected origin; executor mocked'

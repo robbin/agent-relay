@@ -94,21 +94,36 @@ Without the field, the task keeps the manual view/takeover flow.
   allowed. An out-of-scope path is blocked, never silently redirected.
 - Before claiming, the runner requires branch main, a clean index/worktree, no
   unfinished Git operation, HEAD equal to origin/main, an available shared Git
-  lock and no existing task lock. It claims at most one task per timer tick,
-  writes accepted with a fresh `- Updated:` value and pushes only that file.
+  lock, no existing task lock and no leftover execution evidence. It claims at
+  most one task per timer tick, writes accepted with a fresh `- Updated:` value
+  and pushes only that file.
 - The runner never fetches or pulls. It relies on the pull-only sync timer and
   skips when the sync log is too recent (yield to sync) or too old (stale data).
 - A dispatch failure marks the task blocked with the reason. Blocked tasks are
-  neither retried nor replaced; recovery stays an explicit operator action.
+  neither retried nor replaced; recovery stays an explicit operator action. For
+  `- Receipt: required` tasks the block also writes the receipt, and the summary
+  distinguishes "blocked before dispatch" from "the executor ran and side
+  effects are possible".
 - The dispatched agent must stay inside the task scope and allowlist, prepare
   (not perform) publishing, deletion, deployment, permission/firewall changes
-  and external messages, write Result, update status, commit only authorized
-  files, and release its own task lock. With the output gate on (default) the
-  agent does not push; the runner pushes after scanning for likely secrets.
+  and external messages, write Result, update status and commit only authorized
+  files. It must not push: the runner scans the commits, then pushes exactly the
+  commit it scanned. `RELAY_GUARD_WAIT=0` is refused, so the runner always has
+  the final exit status before it issues a push authorization.
 - Before dispatch the runner rejects target directories with `..` or outside
   the allowlist (real path), and blocks tasks whose body matches sensitive
   patterns (credentials, key files, upload commands). Only the validated
   metadata headers are skipped; body fields such as `- Task:` are scanned.
+- A guarded push may only contain the terminal transition of the task the current
+  round owns: `pending → accepted` (this runner), `accepted → done` (approved
+  execution) or `accepted → blocked` (this runner or that execution). Any other
+  to-local change, a task deletion/rename, a to-cloud change, a protocol file
+  edit, a reverse receipt or a task/receipt disagreement refuses the whole push.
+- Execution evidence lives in `<git-dir>/agent-relay-execution/` and is local
+  only. It is created before dispatch and cleared after a verified push.
+  Unknown or failed results keep it (plus `hold/`) and the `PAUSED` marker, so
+  deleting `PAUSED` never authorizes a push. Locks (run, Git, task) are never
+  reclaimed automatically; recovery is always an explicit operator action.
 
 ## Receipts — round-trip tasks
 
