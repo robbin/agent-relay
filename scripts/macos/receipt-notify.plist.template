@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  io.agent-relay.receipt-notify — optional local receipt notifier.
+
+  This file documents the launchd job that scripts/macos/install.sh generates
+  with plutil when the installer is called with --with-receipt-notify. It is a
+  template, not an installed file: replace every __PLACEHOLDER__ before using it
+  manually.
+
+  The job only reads tasks/receipts/to-local/ and raises one macOS notification
+  per new receipt. It never fetches, commits, pushes, calls a model or edits the
+  checkout; the pull-only sync timer (io.agent-relay.sync) delivers the files.
+
+  Manual install:
+    cp receipt-notify.plist.template ~/Library/LaunchAgents/io.agent-relay.receipt-notify.plist
+    # edit placeholders first
+    plutil -lint ~/Library/LaunchAgents/io.agent-relay.receipt-notify.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.agent-relay.receipt-notify.plist
+  Manual removal:
+    launchctl bootout gui/$(id -u)/io.agent-relay.receipt-notify
+
+  Optional environment variables (add as sibling <key>/<string> entries under
+  EnvironmentVariables; documented in docs/setup-local-macos.md):
+    RELAY_STATE_DIR=<dir holding receipts-seen.txt>
+    RELAY_LOG=<log file>
+    RELAY_OSASCRIPT_BIN=<notification binary, default /usr/bin/osascript>
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.agent-relay.receipt-notify</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__RELAY_RECEIPT_NOTIFY_SCRIPT__</string>
+    <string>__RELAY_CHECKOUT__</string>
+  </array>
+
+  <!--
+    RunAtLoad is true here on purpose: the first run records existing receipts
+    as already seen, so installing the job never replays old notifications.
+  -->
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>LANG</key>
+    <string>en_US.UTF-8</string>
+    <key>LC_ALL</key>
+    <string>en_US.UTF-8</string>
+    <key>RELAY_STATE_DIR</key>
+    <string>__RELAY_STATE_DIR__</string>
+    <key>RELAY_LOG</key>
+    <string>__RELAY_LOG__</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__RELAY_LAUNCHD_LOG__</string>
+  <key>StandardErrorPath</key>
+  <string>__RELAY_LAUNCHD_LOG__</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>Nice</key>
+  <integer>5</integer>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+</dict>
+</plist>

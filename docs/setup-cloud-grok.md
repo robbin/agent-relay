@@ -80,12 +80,17 @@ In the **task repo**, copy:
 Add the two secrets above in the task repository's Actions secrets settings.
 Keep the workflow and filter reviewed and committed before sending a task.
 
-The workflow observes pushes to main touching tasks/to-cloud. Its filter considers
-the entire push and not only the final commit. It POSTs a JSON wakeup containing
-repository, ref and after. The receiver validates repository/ref against its own
-configuration, fetches trusted origin, then scans all pending tasks.
+The workflow observes pushes to main touching tasks/to-cloud and
+tasks/receipts/to-cloud. Its filter considers the entire push and not only the
+final commit, and distinguishes two events: `tasks-to-cloud-pending` (repository,
+ref, after and candidate task IDs) and `tasks-to-cloud-receipt` (same fields with
+path `tasks/receipts/to-cloud/`). The receiver validates repository/ref against
+its own configuration, fetches trusted origin, then scans all pending tasks — or
+the named receipts — and deduplicates by task ID.
 
-No automatic result notification or model sweep is installed.
+No automatic result notification or model sweep is installed. A round-trip task
+(`- Receipt: required`) is what makes the receiver write a receipt; the receipt
+wakeup is still only a hint, and the receiver decides whether to continue.
 For a missed wakeup, manually rerun the relevant Actions run or explicitly
 request takeover. For repeated wakeups, existing locks/states prevent reexecution.
 

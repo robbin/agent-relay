@@ -2,10 +2,17 @@ name: Notify cloud agent
 on:
   push:
     branches: [main]
-    paths: ['tasks/to-cloud/**']
+    paths:
+      - 'tasks/to-cloud/**'
+      - 'tasks/receipts/to-cloud/**'
 permissions:
   contents: read
 # No concurrency group: each push must retain its notification opportunity.
+# Two events, both filtered by .github/scripts/notify-filter.sh:
+#   tasks-to-cloud-pending  a newly added pending tasks/to-cloud/<ID>.md
+#   tasks-to-cloud-receipt  a newly added tasks/receipts/to-cloud/<ID>.md
+# Status/result-only edits, deletions, to-local, receipts/to-local, README edits
+# and additions that are not pending do not notify. Protocol: tasks/README.md.
 jobs:
   notify:
     runs-on: ubuntu-latest
@@ -21,9 +28,32 @@ jobs:
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.event.after }}
           FORCED: ${{ github.event.forced }}
+          EVENT: tasks-to-cloud-pending
         run: |
-          result=$(bash .github/scripts/notify-filter.sh "$BEFORE" "$AFTER" "$FORCED")
-          echo "notify=$result" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          notify=$(bash .github/scripts/notify-filter.sh "$BEFORE" "$AFTER" "$FORCED" "$EVENT")
+          ids=$(bash .github/scripts/notify-filter.sh --ids "$BEFORE" "$AFTER" "$FORCED" "$EVENT" \
+            | jq -R -s 'split("\n") | map(select(length > 0))')
+          {
+            echo "notify=$notify"
+            echo "ids=$ids"
+          } >> "$GITHUB_OUTPUT"
+      - name: Detect newly added receipts
+        id: receipts
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+          FORCED: ${{ github.event.forced }}
+          EVENT: tasks-to-cloud-receipt
+        run: |
+          set -euo pipefail
+          notify=$(bash .github/scripts/notify-filter.sh "$BEFORE" "$AFTER" "$FORCED" "$EVENT")
+          ids=$(bash .github/scripts/notify-filter.sh --ids "$BEFORE" "$AFTER" "$FORCED" "$EVENT" \
+            | jq -R -s 'split("\n") | map(select(length > 0))')
+          {
+            echo "notify=$notify"
+            echo "ids=$ids"
+          } >> "$GITHUB_OUTPUT"
       - name: Send wakeup
         if: steps.filter.outputs.notify == 'true'
         env:
@@ -32,13 +62,45 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           REF: ${{ github.ref }}
           AFTER: ${{ github.event.after }}
+          EVENT: tasks-to-cloud-pending
+          PATH_PREFIX: tasks/to-cloud/
+          TASK_IDS: ${{ steps.filter.outputs.ids }}
         run: |
           set -euo pipefail
           test -n "$BOT_WEBHOOK_URL"
           test -n "$BOT_WEBHOOK_SECRET"
           body=$(jq -cn --arg repo "$REPOSITORY" --arg ref "$REF" --arg after "$AFTER" \
-            '{event:"agent-relay",repository:$repo,ref:$ref,after:$after,path:"tasks/to-cloud/"}')
+            --arg event "$EVENT" --arg path "$PATH_PREFIX" \
+            --argjson ids "${TASK_IDS:-[]}" \
+            '{event:$event,repository:$repo,ref:$ref,after:$after,path:$path,task_ids:$ids}')
           # Suppress transport response bodies and URLs; log only success/failure.
+          if ! curl --silent --fail --retry 3 --retry-all-errors \
+            --connect-timeout 15 --max-time 45 --output /dev/null \
+            -X POST "$BOT_WEBHOOK_URL" -H 'Content-Type: application/json' \
+            -H "Authorization: Bearer $BOT_WEBHOOK_SECRET" --data "$body"; then
+            echo 'Webhook delivery failed; inspect endpoint/authentication privately.'
+            exit 1
+          fi
+      - name: Send receipt wakeup
+        if: steps.receipts.outputs.notify == 'true'
+        env:
+          BOT_WEBHOOK_URL: ${{ secrets.BOT_WEBHOOK_URL }}
+          BOT_WEBHOOK_SECRET: ${{ secrets.BOT_WEBHOOK_SECRET }}
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          AFTER: ${{ github.event.after }}
+          EVENT: tasks-to-cloud-receipt
+          PATH_PREFIX: tasks/receipts/to-cloud/
+          TASK_IDS: ${{ steps.receipts.outputs.ids }}
+        run: |
+          set -euo pipefail
+          test -n "$BOT_WEBHOOK_URL"
+          test -n "$BOT_WEBHOOK_SECRET"
+          body=$(jq -cn --arg repo "$REPOSITORY" --arg ref "$REF" --arg after "$AFTER" \
+            --arg event "$EVENT" --arg path "$PATH_PREFIX" \
+            --argjson ids "${TASK_IDS:-[]}" \
+            '{event:$event,repository:$repo,ref:$ref,after:$after,path:$path,task_ids:$ids}')
+          # A receipt event is a wakeup hint for follow-up work, not authority.
           if ! curl --silent --fail --retry 3 --retry-all-errors \
             --connect-timeout 15 --max-time 45 --output /dev/null \
             -X POST "$BOT_WEBHOOK_URL" -H 'Content-Type: application/json' \

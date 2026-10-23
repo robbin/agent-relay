@@ -15,11 +15,19 @@ tasks, so the relay can work automatically in both directions.
 Local → private Git repo / tasks/to-cloud → webhook → cloud agent
 Cloud → private Git repo / tasks/to-local → pull-only macOS sync
                                            → optional runner (opt-in) or human-started local agent
+Round-trip (`- Receipt: required`): receiver → tasks/receipts/<direction> → sender continues
 ```
 
 Each task moves from `pending` to `accepted` to `done` or `blocked`.
 The receiving agent writes its result into the same file.
 Delivery is not acceptance; acceptance is not completion.
+
+A task marked `- Receipt: required` is a round-trip: when the receiver finishes,
+it also writes a short receipt — `tasks/receipts/to-cloud/<ID>.md` after local
+work, `tasks/receipts/to-local/<ID>.md` after cloud work — so the sender can
+continue without polling. Receipts carry the outcome and one next step; they are
+not tasks and grant no new authority. See the protocol for the receipt format and
+the `tasks-to-cloud-receipt` wakeup.
 
 No database, model polling loop, or always-running local agent.
 This is a reference implementation that an agent can read and use to help its
@@ -65,10 +73,13 @@ The runner applies three fail-closed guards (details in
 
 ## What's included
 
-- A shared task protocol and local/cloud skills.
+- A shared task protocol and local/cloud skills, including optional round-trip
+  receipts.
 - A pull-only Git sync script and macOS launchd installer (300 seconds).
 - An optional local auto-relay runner, plist template and installer flag.
-- A GitHub Actions webhook template.
+- An optional read-only receipt notifier (`scripts/macos/receipt-notify.sh`) for
+  new cloud receipts; it only raises macOS notifications.
+- A GitHub Actions webhook template with separate pending-task and receipt events.
 - A Grok Bot integration guide and receiver prompt.
 - Isolated Git/mock tests; no real webhook or agent required.
 
@@ -77,13 +88,15 @@ The runner applies three fail-closed guards (details in
 1. Create a **separate, preferably private task repository**, with branch `main`.
    Do not put real tasks in this public source repository.
 2. Copy `docs/protocol.md` into that repository as `tasks/README.md`.
-   Create `tasks/to-cloud/` and `tasks/to-local/` with empty `.gitkeep` files.
+   Create `tasks/to-cloud/`, `tasks/to-local/`, `tasks/receipts/to-cloud/` and
+   `tasks/receipts/to-local/` with empty `.gitkeep` files.
    Commit and push this initial layout.
 3. Clone the task repository on each endpoint. Use a dedicated cloud checkout
    outside any workspace managed by another auto-commit process.
 4. Follow [macOS setup](docs/setup-local-macos.md) and
    [cloud / Grok setup](docs/setup-cloud-grok.md).
-   The local installer is pull-only unless you pass `--with-runner`.
+   The local installer is pull-only unless you pass `--with-runner` or
+   `--with-receipt-notify`.
 5. Install the appropriate `skills/local/agent-relay/` or
    `skills/cloud/agent-relay/` in your agent's skill directory.
    Configure the task checkout path in that agent's instructions.
@@ -120,8 +133,10 @@ bash tests/test-sync.sh
 bash tests/test-notify.sh
 bash tests/test-relay-runner.sh
 bash tests/test-relay-guard.sh
+bash tests/test-receipt-notify.sh
 ```
 
 Git and Bash are sufficient for these tests. The runner test uses a fake
-executor and disposable Git repositories. macOS is required for launchd.
+executor and disposable Git repositories; the receipt test uses a fake
+notification binary. macOS is required for launchd.
 No package installation is needed. MIT licensed; see [LICENSE](LICENSE).

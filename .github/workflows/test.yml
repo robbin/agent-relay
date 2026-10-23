@@ -22,4 +22,5 @@ jobs:
       - run: bash tests/test-notify.sh
       - run: bash tests/test-relay-runner.sh
       - run: bash tests/test-relay-guard.sh
+      - run: bash tests/test-receipt-notify.sh
       - run: bash tests/test-installer-macos.sh

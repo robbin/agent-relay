@@ -75,6 +75,12 @@ Git credentials. A skill is a behavior guide, not a sandbox or permission bounda
   Use one receiving checkout per role. Multiple independent clones receiving the
   same queue are unsupported without a stronger distributed claim mechanism.
 - Do not run another auto-commit process against the checkout.
+- The optional receipt notifier is read-only: it reads
+  `tasks/receipts/to-local/`, writes only a seen list and a log outside the
+  checkout, and passes receipt text to the notification binary with quotes and
+  backslashes escaped. It starts no agent and costs no model usage. A receipt is
+  a hint: it cannot authorize work, and its text must not be copied into shell
+  commands.
 - The webhook template retries delivery. Remote execution is not exactly-once;
   tasks with external side effects need their own idempotency and recovery checks.
 - Review artifacts before adding them to the task repository. Large or sensitive

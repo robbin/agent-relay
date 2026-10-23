@@ -65,3 +65,42 @@ The runner tests are mocked unit/integration tests, not a live integration test.
 The earlier private deployment passed bidirectional execution and real macOS
 timer delivery. It used localized metadata and a different runner implementation.
 Those results do not replace the above fresh-install checks.
+
+## Round-trip receipts candidate
+
+Added in this candidate: the optional `- Receipt: required` header, the
+`tasks/receipts/to-cloud|to-local/` directories, the two webhook events
+(`tasks-to-cloud-pending`, `tasks-to-cloud-receipt`), and the optional read-only
+receipt notifier.
+
+Passed offline, in disposable local Git repositories and temporary state
+directories:
+- `tests/test-notify.sh` now also covers the receipt event: a new
+  `tasks/receipts/to-cloud/<ID>.md` notifies, while README edits,
+  `tasks/receipts/to-local/` changes and the pending-task event do not; forced,
+  zero and missing-history pushes stay conservative; `--ids` lists candidate IDs;
+  an unknown event name fails.
+- `tests/test-receipt-notify.sh` covers the notifier with a faked notification
+  binary: the first run only records existing receipts as seen, a new receipt is
+  notified once with its result status and summary, repeated runs deduplicate,
+  a failed notification is logged and retried on the next run instead of being
+  marked seen, `tasks/receipts/to-cloud/` and README files are ignored, the
+  checkout is unchanged after a run, a missing receipt directory is a harmless
+  skip, and a relative checkout path is rejected.
+- `tests/test-installer-macos.sh` now also generates and lints the
+  `io.agent-relay.receipt-notify` plist, checks ProgramArguments, interval,
+  RunAtLoad and state/log paths, refuses a duplicate install, installs all three
+  jobs together and removes all of them on uninstall. launchctl is MOCKED; on
+  Linux the test skips.
+- Shell syntax checks (`bash -n`) pass for every shipped script and test.
+
+Not verified:
+- The real Actions workflow, real webhook delivery and a real cloud agent
+  continuing from a receipt event.
+- A real macOS notification, a real launchd schedule for the receipt notifier,
+  and Notification Center behavior when notifications are muted.
+- A real sync-plus-notify cycle where the pull-only timer delivers a receipt and
+  the notifier fires in the same session.
+
+These receipt checks are offline tests with fakes; they are not a live
+integration test of the two-endpoint round trip.

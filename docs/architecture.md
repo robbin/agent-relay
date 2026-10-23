@@ -21,6 +21,8 @@ whole-workspace auto-commit daemon. This is a deliberate deployment difference.
 Local sender ── tasks/to-cloud ──> Git ──> webhook ──> cloud agent (claims/executes)
 Local timer (pull-only ff) <── tasks/to-local ── cloud sender or agent
 Optional local runner (opt-in `- Executor:`) ──> local executor agent (claims/executes)
+Round-trip (`- Receipt: required`): receiver ──> tasks/receipts/to-cloud ──> receipt webhook ──> cloud agent continues
+                                    cloud ──> tasks/receipts/to-local ──> optional receipt notifier (macOS notification only)
 ```
 
 - `scripts/macos/sync.sh` (launchd `io.agent-relay.sync`): fetch plus
@@ -29,9 +31,14 @@ Optional local runner (opt-in `- Executor:`) ──> local executor agent (claim
   reads what sync delivered, claims at most one eligible pending to-local task,
   pushes accepted, dispatches to a configured executor and exits. It never
   fetches, pulls, rebases, stashes or force-pushes.
-- `install.sh` installs the timer; `--with-runner` also installs the runner.
-  `uninstall.sh` removes both installed jobs and leaves repository, logs, runner
-  state and task locks intact.
+- `scripts/macos/receipt-notify.sh` (launchd `io.agent-relay.receipt-notify`,
+  optional): read-only watcher of `tasks/receipts/to-local/`. It notifies once
+  per new receipt and never starts an agent. Receipts to the cloud are pushed by
+  an agent and wake the cloud through the webhook template instead.
+- `install.sh` installs the timer; `--with-runner` also installs the runner and
+  `--with-receipt-notify` the receipt notifier.
+  `uninstall.sh` removes all installed jobs and leaves repository, logs, runner
+  state, receipt seen list and task locks intact.
 
 The runner serializes work with a private run lock, the shared Git lock for its
 short claim/blocked commits, and the per-task lock used by manual takeover. It
@@ -64,6 +71,12 @@ Use a disposable private task repository and explicit user authorization.
    external side effects for this check.
 7. Confirm that a to-local task without `- Executor:` is still untouched by the
    runner after this test.
+8. If round-trip receipts interest you, send one harmless task with
+   `- Receipt: required` and verify the receiver wrote the receipt in the other
+   direction, that it carries the outcome and one next step, and that a receipt
+   for cloud work woke the cloud agent once (the local notifier, if installed,
+   raises a macOS notification only). Confirm a repeated tick does not notify
+   again.
 
 Record commits, timestamps and which actions were manual. Do not reuse IDs.
 A file existing is not proof of skill discovery; test natural-language routing

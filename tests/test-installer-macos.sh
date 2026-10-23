@@ -82,4 +82,43 @@ test ! -e "$HOME/mock-loaded-io.agent-relay.runner"
 test -d "$REPO/.git"
 test -d "$HOME/Library/Logs/agent-relay"
 test -f "$HOME/Library/State/agent-relay/runner/launched/example-task"
-echo 'PASS installer: escaped paths, plist structure, pull-only default, optional runner, reserved env rejection, duplicate refusal, uninstall preserves repo/logs/state; launchctl mocked'
+
+# Optional receipt notifier, installed on its own first.
+N="$HOME/Library/LaunchAgents/io.agent-relay.receipt-notify.plist"
+bash "$ROOT/scripts/macos/install.sh" "$REPO" --with-receipt-notify
+/usr/bin/plutil -lint "$P"
+/usr/bin/plutil -lint "$N"
+test ! -e "$R"
+test "$(/usr/bin/plutil -extract ProgramArguments.1 raw "$N")" = "$DEST/receipt-notify.sh"
+test "$(/usr/bin/plutil -extract ProgramArguments.2 raw "$N")" = "$(cd "$REPO" && pwd -P)"
+test "$(/usr/bin/plutil -extract StartInterval raw "$N")" = 300
+test "$(/usr/bin/plutil -extract RunAtLoad raw "$N")" = true
+test "$(/usr/bin/plutil -extract EnvironmentVariables.RELAY_STATE_DIR raw "$N")" = "$DEST"
+test "$(/usr/bin/plutil -extract EnvironmentVariables.RELAY_LOG raw "$N")" = "$HOME/Library/Logs/agent-relay/receipt-notify.log"
+test -x "$DEST/receipt-notify.sh"
+test -f "$HOME/mock-loaded-io.agent-relay.receipt-notify"
+if bash "$ROOT/scripts/macos/install.sh" "$REPO" --with-receipt-notify >/dev/null 2>&1; then
+  echo 'FAIL duplicate receipt notifier installation allowed'; exit 1
+fi
+bash "$ROOT/scripts/macos/uninstall.sh"
+test ! -e "$P"
+test ! -e "$N"
+test ! -e "$DEST/receipt-notify.sh"
+test ! -e "$HOME/mock-loaded-io.agent-relay.receipt-notify"
+test -d "$REPO/.git"
+
+# All three jobs together, then uninstall removes every plist and script.
+bash "$ROOT/scripts/macos/install.sh" "$REPO" --with-runner --with-receipt-notify
+/usr/bin/plutil -lint "$P" "$R" "$N"
+test -f "$HOME/mock-loaded-io.agent-relay.sync"
+test -f "$HOME/mock-loaded-io.agent-relay.runner"
+test -f "$HOME/mock-loaded-io.agent-relay.receipt-notify"
+bash "$ROOT/scripts/macos/uninstall.sh"
+for f in "$P" "$R" "$N" "$DEST/sync.sh" "$DEST/relay-runner.sh" "$DEST/receipt-notify.sh"; do
+  test ! -e "$f"
+done
+test ! -e "$HOME/mock-loaded-io.agent-relay.sync"
+test ! -e "$HOME/mock-loaded-io.agent-relay.runner"
+test ! -e "$HOME/mock-loaded-io.agent-relay.receipt-notify"
+test -d "$REPO/.git"
+echo 'PASS installer: escaped paths, plist structure, pull-only default, optional runner, optional receipt notifier, reserved env rejection, duplicate refusal, uninstall preserves repo/logs/state; launchctl mocked'

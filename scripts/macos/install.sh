@@ -1,21 +1,26 @@
 #!/bin/bash
-# Installs one or two user launchd jobs. Never modifies the task repository.
+# Installs one, two or three user launchd jobs. Never modifies the task repository.
 #
 #   bash install.sh ABSOLUTE_CHECKOUT [--with-runner] [--runner-env KEY=VALUE]...
+#                    [--with-receipt-notify]
 #
-# Without --with-runner this keeps the original pull-only timer. With
-# --with-runner it also installs the opt-in local auto-relay executor, which is
-# still inert until a pending task explicitly matches its `- Executor:` field.
+# Without extra flags this keeps the original pull-only timer. --with-runner also
+# installs the opt-in local auto-relay executor, which is still inert until a
+# pending task explicitly matches its `- Executor:` field. --with-receipt-notify
+# also installs the read-only notifier for receipts the cloud agent writes; it
+# never starts a model or touches the checkout.
 set -eu
 [ "$(uname -s)" = Darwin ] || { echo 'macOS required' >&2; exit 1; }
-[ "$#" -ge 1 ] || { echo 'usage: bash install.sh ABSOLUTE_CHECKOUT [--with-runner] [--runner-env KEY=VALUE]...' >&2; exit 1; }
+[ "$#" -ge 1 ] || { echo 'usage: bash install.sh ABSOLUTE_CHECKOUT [--with-runner] [--runner-env KEY=VALUE]... [--with-receipt-notify]' >&2; exit 1; }
 REPO=$1
 shift
 WITH_RUNNER=0
+WITH_RECEIPT_NOTIFY=0
 RUNNER_ENV=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --with-runner) WITH_RUNNER=1 ;;
+    --with-receipt-notify) WITH_RECEIPT_NOTIFY=1 ;;
     --runner-env)
       [ "$#" -ge 2 ] || { echo '--runner-env requires KEY=VALUE' >&2; exit 1; }
       case "$2" in
@@ -61,23 +66,32 @@ fi
 
 LABEL=io.agent-relay.sync
 RUNNER_LABEL=io.agent-relay.runner
+RECEIPT_LABEL=io.agent-relay.receipt-notify
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 RUNNER_PLIST="$HOME/Library/LaunchAgents/$RUNNER_LABEL.plist"
+RECEIPT_PLIST="$HOME/Library/LaunchAgents/$RECEIPT_LABEL.plist"
 DEST="$HOME/Library/Application Support/agent-relay"
 LOGS="$HOME/Library/Logs/agent-relay"
 RUNNER_STATE="$HOME/Library/State/agent-relay/runner"
-[ ! -e "$PLIST" ] && [ ! -e "$RUNNER_PLIST" ] && [ ! -e "$DEST" ] || { echo 'Existing install found; uninstall first' >&2; exit 1; }
+[ ! -e "$PLIST" ] && [ ! -e "$RUNNER_PLIST" ] && [ ! -e "$RECEIPT_PLIST" ] && [ ! -e "$DEST" ] || { echo 'Existing install found; uninstall first' >&2; exit 1; }
 if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
   echo 'Existing loaded job found; inspect it first' >&2; exit 1
 fi
 if [ "$WITH_RUNNER" = 1 ] && launchctl print "gui/$(id -u)/$RUNNER_LABEL" >/dev/null 2>&1; then
   echo 'Existing loaded runner job found; inspect it first' >&2; exit 1
 fi
+if [ "$WITH_RECEIPT_NOTIFY" = 1 ] && launchctl print "gui/$(id -u)/$RECEIPT_LABEL" >/dev/null 2>&1; then
+  echo 'Existing loaded receipt-notify job found; inspect it first' >&2; exit 1
+fi
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 [ -f "$SCRIPT_DIR/sync.sh" ] || { echo 'sync.sh missing next to installer' >&2; exit 1; }
 if [ "$WITH_RUNNER" = 1 ]; then
   [ -f "$SCRIPT_DIR/relay-runner.sh" ] || { echo 'relay-runner.sh missing next to installer' >&2; exit 1; }
   bash -n "$SCRIPT_DIR/relay-runner.sh"
+fi
+if [ "$WITH_RECEIPT_NOTIFY" = 1 ]; then
+  [ -f "$SCRIPT_DIR/receipt-notify.sh" ] || { echo 'receipt-notify.sh missing next to installer' >&2; exit 1; }
+  bash -n "$SCRIPT_DIR/receipt-notify.sh"
 fi
 mkdir -p "$(dirname "$PLIST")" "$DEST" "$LOGS"
 
@@ -136,15 +150,59 @@ if [ "$WITH_RUNNER" = 1 ]; then
   chmod 600 "$RUNNER_PLIST"
 fi
 
+# ------------------------------------------------- optional receipt notifier
+if [ "$WITH_RECEIPT_NOTIFY" = 1 ]; then
+  cp "$SCRIPT_DIR/receipt-notify.sh" "$DEST/receipt-notify.sh"
+  chmod 700 "$DEST/receipt-notify.sh"
+  printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict/></plist>' > "$RECEIPT_PLIST"
+  /usr/bin/plutil -insert Label -string "$RECEIPT_LABEL" "$RECEIPT_PLIST"
+  /usr/bin/plutil -insert ProgramArguments -array "$RECEIPT_PLIST"
+  for arg in /bin/bash "$DEST/receipt-notify.sh" "$REPO"; do
+    /usr/bin/plutil -insert ProgramArguments -string "$arg" -append "$RECEIPT_PLIST"
+  done
+  # RunAtLoad is true on purpose: the first run only records existing receipts
+  # as seen, so installing never replays old notifications.
+  /usr/bin/plutil -insert StartInterval -integer 300 "$RECEIPT_PLIST"
+  /usr/bin/plutil -insert RunAtLoad -bool true "$RECEIPT_PLIST"
+  /usr/bin/plutil -insert EnvironmentVariables -dictionary "$RECEIPT_PLIST"
+  /usr/bin/plutil -insert EnvironmentVariables.PATH -string "$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" "$RECEIPT_PLIST"
+  /usr/bin/plutil -insert EnvironmentVariables.HOME -string "$HOME" "$RECEIPT_PLIST"
+  /usr/bin/plutil -insert EnvironmentVariables.LANG -string en_US.UTF-8 "$RECEIPT_PLIST"
+  /usr/bin/plutil -insert EnvironmentVariables.LC_ALL -string en_US.UTF-8 "$RECEIPT_PLIST"
+  /usr/bin/plutil -insert EnvironmentVariables.RELAY_STATE_DIR -string "$DEST" "$RECEIPT_PLIST"
+  /usr/bin/plutil -insert EnvironmentVariables.RELAY_LOG -string "$LOGS/receipt-notify.log" "$RECEIPT_PLIST"
+  /usr/bin/plutil -insert StandardOutPath -string "$LOGS/receipt-notify-error.log" "$RECEIPT_PLIST"
+  /usr/bin/plutil -insert StandardErrorPath -string "$LOGS/receipt-notify-error.log" "$RECEIPT_PLIST"
+  /usr/bin/plutil -insert ProcessType -string Background "$RECEIPT_PLIST"
+  /usr/bin/plutil -insert LowPriorityIO -bool true "$RECEIPT_PLIST"
+  /usr/bin/plutil -insert Nice -integer 5 "$RECEIPT_PLIST"
+  /usr/bin/plutil -insert ThrottleInterval -integer 60 "$RECEIPT_PLIST"
+  /usr/bin/plutil -lint "$RECEIPT_PLIST"
+  chmod 600 "$RECEIPT_PLIST"
+fi
+
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 if [ "$WITH_RUNNER" = 1 ]; then
   if ! launchctl bootstrap "gui/$(id -u)" "$RUNNER_PLIST"; then
     rm -f "$RUNNER_PLIST" "$DEST/relay-runner.sh"
-    echo 'Runner bootstrap failed; removed its plist and installed script. Sync timer remains.' >&2
+    if [ "$WITH_RECEIPT_NOTIFY" = 1 ]; then
+      rm -f "$RECEIPT_PLIST" "$DEST/receipt-notify.sh"
+      echo 'Runner bootstrap failed; removed the runner and receipt-notify plists and scripts. Sync timer remains.' >&2
+    else
+      echo 'Runner bootstrap failed; removed its plist and installed script. Sync timer remains.' >&2
+    fi
     exit 1
   fi
 fi
 echo "Installed $LABEL. Inspect $LOGS/sync.log; this timer only pulls."
 if [ "$WITH_RUNNER" = 1 ]; then
   echo "Installed $RUNNER_LABEL. It dispatches only pending tasks that opt in with a matching '- Executor:' field; inspect $LOGS/runner.log. Test with RELAY_RUNNER_DRY_RUN=1 first."
+fi
+if [ "$WITH_RECEIPT_NOTIFY" = 1 ]; then
+  if ! launchctl bootstrap "gui/$(id -u)" "$RECEIPT_PLIST"; then
+    rm -f "$RECEIPT_PLIST" "$DEST/receipt-notify.sh"
+    echo 'Receipt notifier bootstrap failed; removed its plist and installed script. Other jobs remain.' >&2
+    exit 1
+  fi
+  echo "Installed $RECEIPT_LABEL. It only notifies about new files in tasks/receipts/to-local/; inspect $LOGS/receipt-notify.log."
 fi

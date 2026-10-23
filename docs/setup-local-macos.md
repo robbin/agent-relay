@@ -5,7 +5,8 @@ GitHub with main branch, and noninteractive fetch authentication through SSH or
 the system credential manager. Configure Git identity for agent-created commits.
 
 1. Clone the **task repository**, not this source repository, to a dedicated path.
-   Initialize tasks/README.md and the two task directories as described in README.
+   Initialize tasks/README.md, the two task directories and the two receipt
+   directories as described in README.
 2. From this source checkout, test a single pull:
    ```sh
    bash scripts/macos/sync.sh /absolute/path/to/tasks git@github.com:OWNER/TASKS.git
@@ -18,7 +19,8 @@ the system credential manager. Configure Git identity for agent-created commits.
    ```
    Installation starts a pull immediately, then every 300 seconds. It does not
    start an agent, commit or push. The installer refuses to overwrite an existing
-   install.
+   install. Pass `--with-runner` for the optional executor and/or
+   `--with-receipt-notify` for the optional receipt notifier.
 4. Copy skills/local/agent-relay into your host's user skill directory.
    Tell the agent its role is local, the absolute task checkout path, expected
    repository identity and branch main. Host skill discovery is host-specific;
@@ -29,6 +31,8 @@ Installed files:
 - `~/Library/LaunchAgents/io.agent-relay.sync.plist`
 - `~/Library/Application Support/agent-relay/sync.sh`
 - `~/Library/Logs/agent-relay/sync.log` and `sync-error.log`
+- With the optional flags: `io.agent-relay.runner.plist` / `relay-runner.sh` and
+  `io.agent-relay.receipt-notify.plist` / `receipt-notify.sh`
 
 Check:
 ```sh
@@ -149,8 +153,48 @@ no likely secret is found. On a hit it records `blocked` in a local-only commit,
 writes `PAUSED` and stops; inspect `git log origin/main..HEAD`, clean up, then
 delete `PAUSED`. With `RELAY_GUARD_WAIT=0` the runner does not wait for
 completion and does not verify the final result.
-Uninstall removes both jobs and scripts; it preserves the checkout, logs, state
-directory and locks.
+Uninstall removes all installed jobs and scripts; it preserves the checkout, logs, state
+directory (including the receipt seen list) and locks.
+
+## Optional receipt notifier
+
+For round-trip tasks (`- Receipt: required`), the cloud agent writes
+`tasks/receipts/to-local/<ID>.md` when it finishes local work. The optional
+notifier watches that directory after the pull-only timer delivers the files and
+raises one macOS notification per new receipt. It never fetches, commits, pushes,
+starts an agent or edits the checkout, so it costs no model usage.
+
+```sh
+bash scripts/macos/install.sh /absolute/path/to/tasks --with-receipt-notify
+```
+
+It can be combined with `--with-runner`. To add it to an existing installation,
+run `uninstall.sh` first and reinstall with the flag.
+
+State, logs and settings:
+- `~/Library/LaunchAgents/io.agent-relay.receipt-notify.plist` (300 seconds,
+  RunAtLoad true so the first run records existing receipts as seen)
+- `~/Library/Application Support/agent-relay/receipt-notify.sh`
+- `~/Library/Application Support/agent-relay/receipts-seen.txt` — seen IDs
+- `~/Library/Logs/agent-relay/receipt-notify.log` — one line per decision;
+  `receipt-notify-error.log` holds launchd stdout/stderr
+- `RELAY_STATE_DIR`, `RELAY_LOG` and `RELAY_OSASCRIPT_BIN` override the state
+  directory, log file and notification binary (default `/usr/bin/osascript`)
+
+Check:
+```sh
+launchctl print gui/$(id -u)/io.agent-relay.receipt-notify
+tail -n 30 "$HOME/Library/Logs/agent-relay/receipt-notify.log"
+```
+
+The first run after installation only marks existing receipts as seen and never
+notifies. A notification that fails (for example because notifications are muted
+or the session is not interactive) is logged and retried on the next tick; it is
+marked seen only after a successful notification. Notifications are hints only:
+the receipt file and the original task remain the source of truth, and the timer
+may deliver a receipt up to one sync interval later. The reference plist is
+`scripts/macos/receipt-notify.plist.template`; the installer generates the real
+plist with plutil rather than copying the template.
 
 The installer supports one task checkout per user. Multiple checkout scheduling,
 other OS service managers and remote executor hosts are out of scope.
